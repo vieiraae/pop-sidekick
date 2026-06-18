@@ -22,6 +22,13 @@ final class SelectionMonitor {
 
     private var mouseDownPoint: NSPoint = .zero
 
+    /// How many times to re-probe the Accessibility API before giving up. The
+    /// AX `kAXSelectedText` attribute often lags a frame or two behind the
+    /// actual mouse/keyboard selection, so a single probe races and randomly
+    /// misses real selections. Polling a few times closes that gap.
+    private let maxPollAttempts = 5
+    private let pollInterval: TimeInterval = 0.07
+
     func start() {
         guard monitor == nil else { return }
         enabled = true
@@ -58,46 +65,62 @@ final class SelectionMonitor {
             let dragDistance = hypot(up.x - mouseDownPoint.x, up.y - mouseDownPoint.y)
             let isGesture = dragDistance > 4 || event.clickCount >= 2
             guard isGesture else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-                self?.evaluate(allowCopyFallback: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.pollSelection(attempt: 0, allowCopyFallback: true)
             }
         case .keyUp:
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-                self?.evaluate(allowCopyFallback: false)
+            // Ignore the keyUp from our own synthesized ⌘C/⌘V/⌘X (e.g. the copy
+            // fallback), which would otherwise re-probe and hide the popup.
+            if AccessibilityService.isSynthesizingKeystroke { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.pollSelection(attempt: 0, allowCopyFallback: false)
             }
         default:
             break
         }
     }
 
-    private func evaluate(allowCopyFallback: Bool) {
+    /// Probes the focused element for a selection, retrying a few times to ride
+    /// out Accessibility API lag. Emits as soon as a real selection appears;
+    /// only after all attempts come back empty does it clear or (for read-only
+    /// contexts) try the copy-based fallback.
+    private func pollSelection(attempt: Int, allowCopyFallback: Bool) {
         guard enabled else { return }
 
-        switch AccessibilityService.probeSelection() {
-        case .selection(let selection):
-            // 1. Accessibility selected text (precise, gives bounds when available).
+        let probe = AccessibilityService.probeSelection()
+        if case .selection(let selection) = probe {
             emit(selection)
+            return
+        }
 
-        case .emptyEditable:
-            // A text element is focused but nothing is selected. Do NOT run the
-            // copy fallback here: apps like code editors copy the whole current
-            // line on ⌘C with no selection, which would falsely show the popup.
+        if attempt + 1 < maxPollAttempts {
+            DispatchQueue.main.asyncAfter(deadline: .now() + pollInterval) { [weak self] in
+                self?.pollSelection(attempt: attempt + 1, allowCopyFallback: allowCopyFallback)
+            }
+            return
+        }
+
+        // No AX selection after retries.
+        switch probe {
+        case .noSelectionInfo where allowCopyFallback:
+            // Read-only / non-AX context (web page, PDF): fall back to copy.
+            copyFallback()
+        default:
+            // `.emptyEditable` (focused text element with nothing selected) or a
+            // keyboard event with no AX selection: do not copy-probe, since some
+            // apps copy the whole current line on an empty ⌘C.
             clearIfNeeded()
+        }
+    }
 
-        case .noSelectionInfo:
-            // 2. Copy-based fallback for read-only / non-AX contexts.
-            guard allowCopyFallback else {
-                clearIfNeeded()
+    private func copyFallback() {
+        AccessibilityService.captureSelectionViaCopy { [weak self] text in
+            guard let self, self.enabled else { return }
+            guard let text, !text.isEmpty else {
+                self.clearIfNeeded()
                 return
             }
-            AccessibilityService.captureSelectionViaCopy { [weak self] text in
-                guard let self, self.enabled else { return }
-                guard let text, !text.isEmpty else {
-                    self.clearIfNeeded()
-                    return
-                }
-                self.emit(AccessibilityService.Selection(text: text, bounds: nil, isEditable: false))
-            }
+            self.emit(AccessibilityService.Selection(text: text, bounds: nil, isEditable: true))
         }
     }
 

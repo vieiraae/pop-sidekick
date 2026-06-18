@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -9,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popupController: PopupController?
     private var trustPollTimer: Timer?
     private var monitorStarted = false
+    private let hotkeyManager = HotkeyManager()
+    private var settingsObservation: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -19,12 +22,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         CopilotService.shared.start()
         clipboardMonitor.start()
+        LoginItem.sync(with: SettingsStore.shared.settings.launchAtLogin)
 
         selectionMonitor.onSelection = { [weak self] selection, point in
             guard let self else { return }
             Diag.log("onSelection: len=\(selection.text.count) point=\(point) bounds=\(String(describing: selection.bounds))")
             guard !selection.text.isEmpty else { return }
-            self.popupController?.show(text: selection.text, at: point, isEditable: selection.isEditable)
+            self.popupController?.show(text: selection.text, at: point, isEditable: selection.isEditable, selectionBounds: selection.bounds)
         }
         selectionMonitor.onSelectionCleared = { [weak self] in
             self?.popupController?.hideIfTransient()
@@ -32,12 +36,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         selectionMonitor.isPointInPopup = { [weak self] point in
             self?.popupController?.popupContains(point) ?? false
         }
+        // Clear the selection dedupe when the popup hides, so selecting the same
+        // text again re-shows it.
+        popupController?.onHidden = { [weak self] in
+            self?.selectionMonitor.reset()
+        }
+
+        // Global task hotkeys: run the task on the current selection.
+        hotkeyManager.onTrigger = { [weak self] taskID in
+            guard let self,
+                  let task = SettingsStore.shared.settings.tasks.first(where: { $0.id == taskID })
+            else { return }
+            self.popupController?.runTaskOnSelection(task)
+        }
+        hotkeyManager.register(tasks: SettingsStore.shared.settings.tasks)
+        // Re-register whenever the task list / shortcuts change.
+        settingsObservation = SettingsStore.shared.$settings
+            .map(\.tasks)
+            .removeDuplicates()
+            .sink { [weak self] tasks in
+                self?.hotkeyManager.register(tasks: tasks)
+            }
 
         if AccessibilityService.isTrusted {
             Diag.log("starting selection monitor (trusted)")
             startMonitorIfNeeded()
         } else {
             Diag.log("NOT trusted; prompting for accessibility")
+        }
+
+        // First launch: show the onboarding guide; otherwise prompt for
+        // Accessibility only if it hasn't been granted yet.
+        if !SettingsStore.shared.settings.hasCompletedOnboarding {
+            OnboardingWindow.show()
+        } else if !AccessibilityService.isTrusted {
             promptForAccessibility()
         }
         // Keep polling so the monitor starts the moment the user grants access,
@@ -88,6 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(withTitle: "Open Editor", action: #selector(openEditor), keyEquivalent: "e").target = self
         menu.addItem(.separator())
+        menu.addItem(withTitle: "Setup Guide…", action: #selector(openOnboarding), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Pop Sidekick", action: #selector(quit), keyEquivalent: "q").target = self
@@ -101,6 +134,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         SettingsWindow.show()
+    }
+
+    @objc private func openOnboarding() {
+        OnboardingWindow.show()
     }
 
     @objc private func promptForAccessibility() {

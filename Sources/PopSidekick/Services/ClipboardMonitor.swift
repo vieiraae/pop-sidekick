@@ -23,8 +23,8 @@ final class ClipboardMonitor {
         let pb = NSPasteboard.general
         guard pb.changeCount != lastChangeCount else { return }
         lastChangeCount = pb.changeCount
-        if let text = pb.string(forType: .string) {
-            ClipboardStore.shared.record(text)
+        if let content = RichContent.read(from: pb) {
+            ClipboardStore.shared.record(content)
         }
     }
 }

@@ -1,0 +1,217 @@
+import AppKit
+import CryptoKit
+
+/// How content should be written to the pasteboard when pasting.
+enum PasteStyle {
+    /// Keep the source/rich representation (styled text or image).
+    case source
+    /// Strip formatting and adopt the destination's style (Paste & Match Style).
+    case matchStyle
+    /// Paste unstyled plain text only.
+    case plainText
+}
+
+/// The category of a clipboard payload, mirroring the kinds shown in the macOS
+/// clipboard history (text, image, link, file).
+enum ClipKind: String, Codable {
+    case text, richText, image, link, file
+}
+
+/// A clipboard payload that can carry plain text, rich text (RTF/HTML), an
+/// image, a web link, or file references, so copy/paste round-trips preserve
+/// the original content and the history matches the system clipboard history.
+struct RichContent: Codable, Hashable {
+    var plainText: String
+    var rtfData: Data?
+    var html: String?
+    /// PNG-encoded image data, when the content is (or includes) an image.
+    var imageData: Data?
+    /// File references copied from Finder (or any app), as file URLs.
+    var fileURLs: [URL]?
+    /// A web/mailto link when the content is primarily a single URL.
+    var url: URL?
+
+    init(plainText: String,
+         rtfData: Data? = nil,
+         html: String? = nil,
+         imageData: Data? = nil,
+         fileURLs: [URL]? = nil,
+         url: URL? = nil) {
+        self.plainText = plainText
+        self.rtfData = rtfData
+        self.html = html
+        self.imageData = imageData
+        self.fileURLs = (fileURLs?.isEmpty == true) ? nil : fileURLs
+        self.url = url
+    }
+
+    var hasRichText: Bool { rtfData != nil || html != nil }
+    var hasImage: Bool { imageData != nil }
+    var hasFiles: Bool { (fileURLs?.isEmpty == false) }
+    var image: NSImage? { imageData.flatMap { NSImage(data: $0) } }
+
+    /// The category this payload belongs to (used for display and pasting).
+    var kind: ClipKind {
+        if hasFiles { return .file }
+        if imageData != nil && plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .image }
+        if url != nil { return .link }
+        if hasRichText { return .richText }
+        return .text
+    }
+
+    var isEmpty: Bool {
+        plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && imageData == nil && !hasFiles && url == nil
+    }
+
+    /// Identity used for de-duplicating history.
+    /// Uses stable, content-derived keys so dedup survives relaunches.
+    var dedupeKey: String {
+        if hasFiles { return "file:\(fileURLs!.map(\.path).joined(separator: "|"))" }
+        if let imageData { return "img:\(Self.sha256(imageData))" }
+        if let url, plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || plainText == url.absoluteString {
+            return "url:\(url.absoluteString)"
+        }
+        return "txt:\(plainText)"
+    }
+
+    /// Hex-encoded SHA-256 digest of the given data.
+    static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    var preview: String {
+        switch kind {
+        case .file:
+            let names = (fileURLs ?? []).map { $0.lastPathComponent }
+            if names.count == 1 { return names[0] }
+            return "\(names.count) items" + (names.first.map { " — \($0)…" } ?? "")
+        case .image:
+            return "Image"
+        case .link:
+            return url?.absoluteString ?? plainText
+        default:
+            let trimmed = plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let oneLine = trimmed.replacingOccurrences(of: "\n", with: " ")
+            return oneLine.count > 80 ? String(oneLine.prefix(80)) + "…" : oneLine
+        }
+    }
+
+    // MARK: - Pasteboard I/O
+
+    /// Reads the richest available representation from a pasteboard.
+    static func read(from pb: NSPasteboard) -> RichContent? {
+        // Files take priority — copying in Finder yields file URLs (plus a
+        // string of the path we don't want to treat as plain text).
+        if let files = pb.readObjects(forClasses: [NSURL.self],
+                                      options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           !files.isEmpty {
+            let plain = files.map { $0.path }.joined(separator: "\n")
+            return RichContent(plainText: plain, fileURLs: files)
+        }
+
+        let plain = pb.string(forType: .string) ?? ""
+        let rtf = pb.data(forType: .rtf)
+        let html = pb.string(forType: .html)
+        let image = readImagePNG(from: pb)
+        let link = readWebURL(from: pb, plain: plain)
+        if plain.isEmpty && rtf == nil && html == nil && image == nil && link == nil { return nil }
+        return RichContent(plainText: plain, rtfData: rtf, html: html, imageData: image, url: link)
+    }
+
+    /// Returns a non-file URL when the content is essentially a single link.
+    private static func readWebURL(from pb: NSPasteboard, plain: String) -> URL? {
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+           let web = urls.first(where: { !$0.isFileURL }) {
+            return web
+        }
+        // Fall back to detecting a bare single link in the plain text.
+        let trimmed = plain.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(where: { $0 == " " || $0 == "\n" }),
+              let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return nil }
+        let range = NSRange(trimmed.startIndex..., in: trimmed)
+        guard let match = detector.firstMatch(in: trimmed, options: [], range: range),
+              match.range == range else { return nil }
+        return match.url
+    }
+
+    private static func readImagePNG(from pb: NSPasteboard) -> Data? {
+        if let data = pb.data(forType: .png) { return data }
+        if let data = pb.data(forType: .tiff), let png = NSImage(data: data)?.pngData() { return png }
+        if let img = NSImage(pasteboard: pb) { return img.pngData() }
+        return nil
+    }
+
+    /// Writes the content to a pasteboard honoring the requested style.
+    func write(to pb: NSPasteboard, style: PasteStyle) {
+        pb.clearContents()
+        switch style {
+        case .source:
+            // Files: write the file references so Finder (and apps) paste the
+            // actual files; include the path string for text destinations.
+            if hasFiles, let fileURLs {
+                pb.writeObjects(fileURLs as [NSURL])
+                if !plainText.isEmpty { pb.setString(plainText, forType: .string) }
+                return
+            }
+            // Links: write the URL object plus its string.
+            if kind == .link, let url {
+                pb.writeObjects([url as NSURL])
+                pb.setString(url.absoluteString, forType: .string)
+                return
+            }
+            var types: [NSPasteboard.PasteboardType] = []
+            if imageData != nil { types += [.png, .tiff] }
+            if rtfData != nil { types.append(.rtf) }
+            if html != nil { types.append(.html) }
+            if !plainText.isEmpty { types.append(.string) }
+            pb.declareTypes(types, owner: nil)
+            if let imageData {
+                pb.setData(imageData, forType: .png)
+                if let tiff = NSImage(data: imageData)?.tiffRepresentation {
+                    pb.setData(tiff, forType: .tiff)
+                }
+            }
+            if let rtfData { pb.setData(rtfData, forType: .rtf) }
+            if let html { pb.setString(html, forType: .html) }
+            if !plainText.isEmpty { pb.setString(plainText, forType: .string) }
+        case .matchStyle, .plainText:
+            pb.declareTypes([.string], owner: nil)
+            pb.setString(plainText, forType: .string)
+        }
+    }
+
+    // MARK: - Markdown
+
+    /// Builds rich content from Markdown source, producing RTF and HTML
+    /// representations alongside the raw text so styled output can be pasted.
+    static func fromMarkdown(_ markdown: String) -> RichContent {
+        guard let attributed = try? NSAttributedString(
+            markdown: markdown,
+            options: .init(interpretedSyntax: .full,
+                           failurePolicy: .returnPartiallyParsedIfPossible)
+        ), attributed.length > 0 else {
+            return RichContent(plainText: markdown)
+        }
+        let full = NSRange(location: 0, length: attributed.length)
+        let rtf = try? attributed.data(
+            from: full,
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
+        let htmlData = try? attributed.data(
+            from: full,
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.html]
+        )
+        let html = htmlData.flatMap { String(data: $0, encoding: .utf8) }
+        return RichContent(plainText: markdown, rtfData: rtf, html: html)
+    }
+}
+
+extension NSImage {
+    /// PNG encoding of the image's best bitmap representation.
+    func pngData() -> Data? {
+        guard let tiff = tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+}

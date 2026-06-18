@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The PopClip-style compact action bar shown immediately on selection.
+/// The Popup-style compact action bar shown immediately on selection.
 struct CompactBarView: View {
     @ObservedObject var vm: PopupViewModel
     @ObservedObject var clipboard = ClipboardStore.shared
@@ -39,16 +39,31 @@ struct CompactBarView: View {
         .padding(.horizontal, 8)
         .frame(width: barSize.width > 0 ? barSize.width : nil,
                height: barSize.height > 0 ? barSize.height : nil)
+        .frame(minWidth: Metrics.processingMinWidth)
     }
 
     private var actionBar: some View {
         HStack(spacing: 2) {
+            if vm.detectedFolder != nil {
+                IconButton(systemName: "folder", help: "Open in Finder", prominent: true) {
+                    vm.openDetectedFolder()
+                }
+                VBar()
+            }
+            if vm.detectedURL != nil {
+                IconButton(systemName: "arrow.up.right.square", help: "Open Link", prominent: true) {
+                    vm.openDetectedURL()
+                }
+                VBar()
+            }
             if vm.isEditable {
                 IconButton(systemName: "scissors", help: "Cut") { vm.doCut() }
             }
             IconButton(systemName: "doc.on.doc", help: "Copy") { vm.doCopy() }
             if vm.isEditable {
-                IconButton(systemName: "clipboard", help: "Paste") { vm.doPaste() }
+                PasteMenu(systemName: "clipboard", help: "Paste") { style in
+                    vm.pasteCurrentClipboard(style: style)
+                }
             }
 
             VBar()
@@ -59,13 +74,17 @@ struct CompactBarView: View {
             if vm.isEditable {
                 VBar()
 
-                IconButton(systemName: "checkmark.seal", help: "Proofread") { vm.runBuiltin("proofread") }
-                IconButton(systemName: "pencil.and.outline", help: "Rewrite") { vm.runBuiltin("rewrite") }
+                ForEach(vm.popupTasks) { task in
+                    IconButton(systemName: task.icon, help: task.name) { vm.run(task: task) }
+                }
                 tasksMenu
             }
 
             VBar()
 
+            IconButton(systemName: "text.bubble", help: "Ask Copilot — describe how to transform the text") {
+                vm.openPrompt()
+            }
             IconButton(systemName: "sparkles", help: "Edit", prominent: true) {
                 vm.expandToEdit()
             }
@@ -82,22 +101,37 @@ struct CompactBarView: View {
             } else {
                 ForEach(clipboard.history) { item in
                     Menu {
-                        Button("Paste") { vm.paste(item.text) }
+                        Button("Paste") { vm.paste(item.content, style: .source) }
+                        if item.isImage {
+                            Button("Paste Extracted Text") { vm.extractTextFromImage(item) }
+                        }
+                        if item.hasRichText {
+                            Button("Paste and Match Style") { vm.paste(item.content, style: .matchStyle) }
+                        }
+                        if !item.isImage {
+                            Button(item.isFile ? "Paste Path as Text" : "Paste as Plain Text") {
+                                vm.paste(item.content, style: .plainText)
+                            }
+                        }
+                        Divider()
                         Button(item.bookmarked ? "Bookmarked" : "Bookmark") {
                             clipboard.bookmark(item)
                         }.disabled(item.bookmarked)
-                        Button("Edit…") { vm.beginEditingClip(item) }
+                        if item.isEditableText {
+                            Button("Edit…") { vm.beginEditingClip(item) }
+                        }
+                        Button("Delete", role: .destructive) { clipboard.delete(item) }
                     } label: {
-                        Text(item.preview)
+                        clipItemLabel(item)
                     } primaryAction: {
-                        vm.paste(item.text)
+                        vm.paste(item.content, style: .source)
                     }
                 }
                 Divider()
                 Button("Clear History") { clipboard.clearHistory() }
             }
         } label: {
-            MenuIconLabel(systemName: "clock.arrow.circlepath")
+            MenuIconLabel(systemName: "clock.arrow.circlepath", accessibilityLabel: "Clipboard History")
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -113,15 +147,34 @@ struct CompactBarView: View {
                 Text("No bookmarks").foregroundStyle(.secondary)
             } else {
                 ForEach(clipboard.bookmarks) { item in
-                    Menu(item.preview) {
-                        Button("Paste") { vm.paste(item.text) }
+                    Menu {
+                        Button("Paste") { vm.paste(item.content, style: .source) }
+                        if item.isImage {
+                            Button("Paste Extracted Text") { vm.extractTextFromImage(item) }
+                        }
+                        if item.hasRichText {
+                            Button("Paste and Match Style") { vm.paste(item.content, style: .matchStyle) }
+                        }
+                        if !item.isImage {
+                            Button(item.isFile ? "Paste Path as Text" : "Paste as Plain Text") {
+                                vm.paste(item.content, style: .plainText)
+                            }
+                        }
+                        Divider()
                         Button("Unbookmark") { clipboard.unbookmark(item) }
-                        Button("Edit…") { vm.beginEditingClip(item) }
+                        if item.isEditableText {
+                            Button("Edit…") { vm.beginEditingClip(item) }
+                        }
+                        Button("Delete", role: .destructive) { clipboard.delete(item) }
+                    } label: {
+                        clipItemLabel(item)
+                    } primaryAction: {
+                        vm.paste(item.content, style: .source)
                     }
                 }
             }
         } label: {
-            MenuIconLabel(systemName: "bookmark")
+            MenuIconLabel(systemName: "bookmark", accessibilityLabel: "Bookmarks")
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -129,6 +182,45 @@ struct CompactBarView: View {
         .fixedSize()
         .help("Bookmarks")
         .tooltip("Bookmarks")
+    }
+
+    /// Menu label for a clip item — a type-appropriate icon plus a preview.
+    @ViewBuilder
+    private func clipItemLabel(_ item: ClipItem) -> some View {
+        switch item.kind {
+        case .image:
+            Label {
+                Text("Image")
+            } icon: {
+                if let image = item.content.image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 16, height: 16)
+                } else {
+                    Image(systemName: "photo")
+                }
+            }
+        case .file:
+            Label {
+                Text(item.preview)
+            } icon: {
+                if let path = item.filePaths?.first {
+                    Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 16, height: 16)
+                } else {
+                    Image(systemName: "doc")
+                }
+            }
+        case .link:
+            Label(item.preview, systemImage: "link")
+        case .richText:
+            Label(item.preview, systemImage: "textformat")
+        case .text:
+            Label(item.preview, systemImage: "text.alignleft")
+        }
     }
 
     private var tasksMenu: some View {
@@ -141,7 +233,7 @@ struct CompactBarView: View {
                 }
             }
         } label: {
-            MenuIconLabel(systemName: "list.bullet.rectangle")
+            MenuIconLabel(systemName: "chevron.up.chevron.down", accessibilityLabel: "Tasks")
         }
         .menuStyle(.button)
         .buttonStyle(.plain)

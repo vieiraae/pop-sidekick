@@ -18,7 +18,7 @@ struct EditView: View {
             }
         }
         .padding(12)
-        .frame(width: 391)
+        .frame(width: Metrics.editWidth)
     }
 
     // MARK: - Header
@@ -94,7 +94,7 @@ struct EditView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Picker("", selection: $vm.model) {
-                    ForEach(copilot.models) { m in Text(m.name).tag(m.id) }
+                    ForEach(copilot.availableModels) { m in Text(m.name).tag(m.id) }
                 }
                 .frame(maxWidth: 160)
                 .help("Model")
@@ -190,7 +190,13 @@ struct EditView: View {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
         }
-        if !vm.results.isEmpty {
+        let allEmpty = vm.results.allSatisfy { $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if !vm.results.isEmpty && !vm.isProcessing && allEmpty && vm.statusMessage == nil {
+            HStack(spacing: 6) {
+                Image(systemName: "text.badge.xmark").foregroundStyle(.secondary)
+                Text("No result").font(.caption).foregroundStyle(.secondary)
+            }
+        } else if !vm.results.isEmpty {
             ScrollView {
                 VStack(spacing: 8) {
                     ForEach(Array(vm.results.enumerated()), id: \.element.id) { idx, item in

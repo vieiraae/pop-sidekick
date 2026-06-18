@@ -23,11 +23,11 @@ struct PopupRootView: View {
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 .shadow(color: .black.opacity(0.22), radius: 16, y: 6)
         }
-        .padding(8)
+        .padding(Metrics.popupInset)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: vm.mode)
     }
 
-    private var cornerRadius: CGFloat { vm.mode == .compact ? 12 : 16 }
+    private var cornerRadius: CGFloat { vm.mode == .edit ? Metrics.editCornerRadius : Metrics.compactCornerRadius }
 
     @ViewBuilder
     private var content: some View {
@@ -36,6 +36,8 @@ struct PopupRootView: View {
             CompactBarView(vm: vm)
         case .edit:
             EditView(vm: vm)
+        case .prompt:
+            PromptView(vm: vm)
         }
     }
 }

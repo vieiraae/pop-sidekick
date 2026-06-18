@@ -48,8 +48,21 @@ find "$BUNDLE/Contents/Resources/bridge/node_modules" -type l ! -exec test -e {}
 echo "==> Signing"
 SIGN_ID="${POPSIDEKICK_SIGN_ID:-PopSidekick Dev}"
 if security find-identity -p codesigning -v 2>/dev/null | grep -q "$SIGN_ID"; then
-  echo "    Using stable identity: $SIGN_ID (Accessibility grant persists across rebuilds)"
-  codesign --force --deep --sign "$SIGN_ID" "$BUNDLE"
+  if printf '%s' "$SIGN_ID" | grep -q "Developer ID"; then
+    # Distribution signing: hardened runtime + secure timestamp, required for
+    # Apple notarization. Sign nested Mach-O (native node addons / dylibs)
+    # first so the outer app signature seals an already-valid bundle.
+    echo "    Using Developer ID identity: $SIGN_ID (hardened runtime, for notarization)"
+    while IFS= read -r macho; do
+      [ -n "$macho" ] || continue
+      codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$macho"
+    done < <(find "$BUNDLE/Contents/Resources" \( -name "*.node" -o -name "*.dylib" -o -name "*.so" \) 2>/dev/null)
+    codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$BUNDLE/Contents/MacOS/PopSidekick"
+    codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$BUNDLE"
+  else
+    echo "    Using stable identity: $SIGN_ID (Accessibility grant persists across rebuilds)"
+    codesign --force --deep --sign "$SIGN_ID" "$BUNDLE"
+  fi
 else
   echo "    No '$SIGN_ID' identity found; falling back to ad-hoc (grant resets each build)."
   codesign --force --deep --sign - "$BUNDLE"

@@ -29,10 +29,10 @@ struct ResultRowView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { copied = false }
                 }
                 IconButton(systemName: "clipboard", help: "Paste") {
-                    vm.paste(item.text)
+                    vm.paste(item.text, style: .source)
                 }
             }
-            Text(item.text.isEmpty ? " " : item.text)
+            Text(renderedText)
                 .font(.system(size: 12))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -43,5 +43,17 @@ struct ResultRowView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color.primary.opacity(0.05))
         )
+    }
+
+    /// The result rendered as Markdown (inline styling), falling back to plain.
+    private var renderedText: AttributedString {
+        if item.text.isEmpty { return AttributedString(" ") }
+        if let attributed = try? AttributedString(
+            markdown: item.text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) {
+            return attributed
+        }
+        return AttributedString(item.text)
     }
 }

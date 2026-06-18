@@ -11,6 +11,7 @@ struct ResultItem: Identifiable {
 enum PopupMode {
     case compact
     case edit
+    case prompt
 }
 
 /// Drives a single popup instance: holds the selected text, edit configuration,
@@ -35,6 +36,8 @@ final class PopupViewModel: ObservableObject {
     @Published var format: OutputFormat? { didSet { SettingsStore.shared.settings.editFormat = format } }
     @Published var length: Length? { didSet { SettingsStore.shared.settings.editLength = length } }
     @Published var extraInstructions: String = ""
+    /// Free-form instruction entered in the prompt panel.
+    @Published var promptText: String = ""
     @Published var model: String = "auto"
     @Published var choices: Int = 1
 
@@ -56,11 +59,57 @@ final class PopupViewModel: ObservableObject {
     private var replaceOnComplete = false
 
     var allTasks: [TaskDef] { SettingsStore.shared.settings.allTasks }
+    /// Tasks the user has chosen to surface as buttons in the compact bar.
+    var popupTasks: [TaskDef] { SettingsStore.shared.settings.popupTasks }
+
+    /// A folder when the selection is a path to an existing directory, so the
+    /// popup can offer to reveal it in Finder. Computed once per selection.
+    @Published private(set) var detectedFolder: URL?
+    /// A URL when the selection is (essentially) a single hyperlink, so the
+    /// popup can offer to open it in the default browser. Computed once.
+    @Published private(set) var detectedURL: URL?
+
+    /// Returns a URL if the trimmed text is a path to an existing directory.
+    private static func folderURL(in text: String) -> URL? {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        // Accept file:// URLs and strip surrounding quotes.
+        if trimmed.hasPrefix("file://"), let u = URL(string: trimmed) { trimmed = u.path }
+        if (trimmed.hasPrefix("\"") && trimmed.hasSuffix("\"")) ||
+           (trimmed.hasPrefix("'") && trimmed.hasSuffix("'")), trimmed.count >= 2 {
+            trimmed = String(trimmed.dropFirst().dropLast())
+        }
+        // Only treat absolute or home-relative paths as folder candidates.
+        guard trimmed.hasPrefix("/") || trimmed.hasPrefix("~") else { return nil }
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue else {
+            return nil
+        }
+        return URL(fileURLWithPath: expanded)
+    }
+
+    /// A URL when the selection is (essentially) a single hyperlink, so the
+    /// popup can offer to open it in the default browser.
+    /// Returns a URL if the trimmed text is a single link (http/https/mailto or
+    /// a bare domain). Returns nil for prose that merely contains a URL.
+    private static func firstURL(in text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(where: { $0 == " " || $0 == "\n" }) else { return nil }
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return nil }
+        let range = NSRange(trimmed.startIndex..., in: trimmed)
+        guard let match = detector.firstMatch(in: trimmed, options: [], range: range),
+              match.range == range,
+              let url = match.url else { return nil }
+        return url
+    }
 
     func configure(with text: String, isEditable: Bool = true) {
         selectedText = text
         editText = text
         self.isEditable = isEditable
+        detectedFolder = Self.folderURL(in: text)
+        detectedURL = Self.firstURL(in: text)
         let settings = SettingsStore.shared.settings
         model = settings.model
         choices = max(1, settings.defaultChoices)
@@ -89,37 +138,107 @@ final class PopupViewModel: ObservableObject {
 
     func doCopy() { performClipboard { AccessibilityService.copy() } }
 
-    func doPaste() { performClipboard { AccessibilityService.paste() } }
+    /// Pastes whatever is currently on the system clipboard, honoring the style.
+    func pasteCurrentClipboard(style: PasteStyle = .source) {
+        switch style {
+        case .source:
+            performClipboard { AccessibilityService.paste() }
+        case .matchStyle:
+            performClipboard { AccessibilityService.pasteAndMatchStyle() }
+        case .plainText:
+            let pb = NSPasteboard.general
+            let plain = pb.string(forType: .string) ?? ""
+            pb.clearContents()
+            pb.setString(plain, forType: .string)
+            performClipboard { AccessibilityService.paste() }
+        }
+    }
 
-    func paste(_ text: String) {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(text, forType: .string)
-        performClipboard { AccessibilityService.paste() }
+    /// Writes rich content to the pasteboard and pastes it with the given style.
+    private func performPaste(_ content: RichContent, style: PasteStyle) {
+        content.write(to: NSPasteboard.general, style: style)
+        sourceApp?.activate()
+        let willClose = !pinned
+        if willClose { onRequestClose?() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) {
+            switch style {
+            case .matchStyle: AccessibilityService.pasteAndMatchStyle()
+            default: AccessibilityService.paste()
+            }
+        }
+    }
+
+    /// Pastes clipboard-history / bookmark content, preserving styling/images.
+    func paste(_ content: RichContent, style: PasteStyle = .source) {
+        performPaste(content, style: style)
+    }
+
+    /// Pastes plain or Markdown text. Source style renders Markdown to rich text.
+    func paste(_ text: String, style: PasteStyle = .source) {
+        let content = (style == .source) ? RichContent.fromMarkdown(text) : RichContent(plainText: text)
+        performPaste(content, style: style)
     }
 
     func copyToClipboard(_ text: String) {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(text, forType: .string)
+        RichContent.fromMarkdown(text).write(to: NSPasteboard.general, style: .source)
+    }
+
+    /// Opens the detected URL in the default browser, then closes (unless pinned).
+    func openDetectedURL() {
+        guard let url = detectedURL else { return }
+        NSWorkspace.shared.open(url)
+        if !pinned { onRequestClose?() }
+    }
+
+    /// Opens the detected folder in Finder, then closes (unless pinned).
+    func openDetectedFolder() {
+        guard let url = detectedFolder else { return }
+        NSWorkspace.shared.open(url)
+        if !pinned { onRequestClose?() }
     }
 
     // MARK: - AI actions
-
-    func runBuiltin(_ id: String) {
-        guard let task = allTasks.first(where: { $0.id == id }) else { return }
-        run(task: task)
-    }
 
     func run(task: TaskDef) {
         let prompt = buildPrompt(instruction: task.instruction, text: selectedText, includeStyling: false)
         startRun(prompt: prompt, replace: isEditable, statusLabel: "\(task.name)…")
     }
 
+    /// Extracts the text from an image clipboard item using Copilot (OCR) and
+    /// pastes the result into the source app. The image is sent as a blob
+    /// attachment to a vision-capable model.
+    func extractTextFromImage(_ item: ClipItem) {
+        guard let png = item.imageData else { return }
+        let attachment: [String: Any] = [
+            "type": "blob",
+            "data": png.base64EncodedString(),
+            "mimeType": "image/png",
+            "displayName": "clipboard-image.png",
+        ]
+        let prompt = """
+        Extract all text from the attached image exactly as it appears, \
+        preserving line breaks and reading order. Reply with only the extracted \
+        text and nothing else. If the image contains no text, reply with nothing.
+        """
+        startRun(prompt: prompt, replace: true, statusLabel: "Extracting text…",
+                 attachments: [attachment])
+    }
+
     func runEdit() {
         let task = taskID.flatMap { id in allTasks.first(where: { $0.id == id }) }
         let prompt = buildPrompt(instruction: task?.instruction, text: editText, includeStyling: true)
         startRun(prompt: prompt, statusLabel: task.map { "\($0.name)…" } ?? "Working…")
+    }
+
+    /// Runs the free-form prompt: the user's instruction transforms the
+    /// selected text. Mirrors quick-task behaviour — shows the compact
+    /// processing bar and replaces the selection automatically when editable.
+    func runPrompt() {
+        let instruction = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty else { return }
+        let prompt = buildPrompt(instruction: instruction, text: selectedText, includeStyling: false)
+        mode = .compact
+        startRun(prompt: prompt, replace: isEditable, statusLabel: instruction)
     }
 
     private func buildPrompt(instruction: String?, text: String, includeStyling: Bool) -> String {
@@ -147,7 +266,8 @@ final class PopupViewModel: ObservableObject {
         return parts.joined(separator: "\n")
     }
 
-    private func startRun(prompt: String, replace: Bool = false, statusLabel: String = "Working…") {
+    private func startRun(prompt: String, replace: Bool = false, statusLabel: String = "Working…",
+                          attachments: [[String: Any]]? = nil) {
         currentRun.map { copilot.cancel($0) }
         replaceOnComplete = replace
         // Replace mode always produces a single result to write back.
@@ -159,7 +279,7 @@ final class PopupViewModel: ObservableObject {
         // border + a cancel button); only explicit Edit runs expand the editor.
         if !replace && mode == .compact { mode = .edit }
 
-        let handle = copilot.run(prompt: prompt, model: model, choices: n)
+        let handle = copilot.run(prompt: prompt, model: model, choices: n, attachments: attachments)
         currentRun = handle
 
         handle.onDelta = { [weak self] choice, piece in
@@ -240,6 +360,15 @@ final class PopupViewModel: ObservableObject {
 
     func expandToEdit() {
         mode = .edit
+        if copilot.models.count <= 1 { copilot.refreshModels() }
+    }
+
+    /// Replaces the popup with a free-form prompt panel.
+    func openPrompt() {
+        promptText = ""
+        results = []
+        statusMessage = nil
+        mode = .prompt
         if copilot.models.count <= 1 { copilot.refreshModels() }
     }
 

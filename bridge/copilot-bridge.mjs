@@ -8,13 +8,16 @@
 // Requests (Swift -> bridge):
 //   { cmd: "listModels", id }
 //   { cmd: "run", id, prompt, model?, systemMessage?, choices?,
-//                 mcpServers?, skillDirectories?, enableConfigDiscovery? }
+//                 mcpServers?, skillDirectories?, enableConfigDiscovery?,
+//                 autoApproveTools?, timeoutMs?, attachments?, provider? }
+//   { cmd: "ping", id, model?, provider?, prompt?, timeoutMs? }
 //   { cmd: "cancel", id }
 //   { cmd: "shutdown" }
 //
 // Events (bridge -> Swift):
 //   { type: "ready" }
 //   { type: "models", id, models: [{ id, name }] }
+//   { type: "pong",   id }
 //   { type: "delta",  id, choice, text }
 //   { type: "result", id, choice, text }
 //   { type: "done",   id }
@@ -61,9 +64,18 @@ async function handleListModels(req) {
   }
 }
 
+// Permission handler that rejects every tool/path/url request, used when the
+// user disables automatic tool approval (the bridge runs headless and cannot
+// prompt interactively).
+const denyAll = () => ({
+  kind: "reject",
+  feedback: "Tool use is disabled in Pop Sidekick settings.",
+});
+
 function buildSessionConfig(req) {
+  const autoApprove = req.autoApproveTools !== false;
   const config = {
-    onPermissionRequest: approveAll,
+    onPermissionRequest: autoApprove ? approveAll : denyAll,
   };
   if (req.model && req.model !== "auto") config.model = req.model;
   if (req.systemMessage && req.systemMessage.trim().length > 0) {
@@ -76,6 +88,8 @@ function buildSessionConfig(req) {
     config.skillDirectories = req.skillDirectories;
   }
   if (req.enableConfigDiscovery) config.enableConfigDiscovery = true;
+  // BYOK: pass the user-supplied provider config straight through to the SDK.
+  if (req.provider && req.provider.baseUrl) config.provider = req.provider;
   return config;
 }
 
@@ -94,7 +108,29 @@ async function runOneChoice(req, choiceIndex, sessionsBag) {
   });
 
   try {
-    const final = await session.sendAndWait({ prompt: req.prompt });
+    const timeoutMs = Number(req.timeoutMs) || 0;
+    const sendOptions = { prompt: req.prompt };
+    if (Array.isArray(req.attachments) && req.attachments.length > 0) {
+      sendOptions.attachments = req.attachments;
+    }
+    const sendPromise = session.sendAndWait(sendOptions);
+    let final;
+    if (timeoutMs > 0) {
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s`)),
+          timeoutMs,
+        );
+      });
+      try {
+        final = await Promise.race([sendPromise, timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    } else {
+      final = await sendPromise;
+    }
     const finalText = final?.data?.content ?? full;
     emit({ type: "result", id: req.id, choice: choiceIndex, text: finalText });
   } finally {
@@ -122,6 +158,37 @@ async function handleRun(req) {
     emit({ type: "error", id: req.id, message: errMsg(err) });
   } finally {
     active.delete(req.id);
+  }
+}
+
+async function handlePing(req) {
+  const timeoutMs = Number(req.timeoutMs) || 120000;
+  let session;
+  let timer;
+  // The whole operation (client start + session create + first completion) is
+  // raced against the timeout. Local providers (Ollama / Foundry Local) can be
+  // slow on the first request because the model is loaded on demand.
+  const work = (async () => {
+    const c = await getClient();
+    session = await c.createSession(buildSessionConfig(req));
+    await session.sendAndWait({ prompt: req.prompt || "Reply with: OK" });
+  })();
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(
+        `No response within ${Math.round(timeoutMs / 1000)}s. The endpoint may be unreachable, or a local model may still be loading — try again.`,
+      )),
+      timeoutMs,
+    );
+  });
+  try {
+    await Promise.race([work, timeout]);
+    emit({ type: "pong", id: req.id });
+  } catch (err) {
+    emit({ type: "error", id: req.id, message: errMsg(err) });
+  } finally {
+    clearTimeout(timer);
+    if (session) { try { await session.disconnect(); } catch {} }
   }
 }
 
@@ -168,6 +235,7 @@ rl.on("line", (line) => {
   switch (req.cmd) {
     case "listModels": handleListModels(req); break;
     case "run": handleRun(req); break;
+    case "ping": handlePing(req); break;
     case "cancel": handleCancel(req); break;
     case "shutdown": shutdown(); break;
     default: emit({ type: "error", id: req.id, message: "Unknown cmd: " + req.cmd });

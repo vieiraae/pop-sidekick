@@ -1,5 +1,51 @@
 import Foundation
 
+/// A recorded global keyboard shortcut (Carbon key code + modifier mask).
+struct Hotkey: Codable, Hashable {
+    /// Virtual key code (e.g. `kVK_ANSI_P`).
+    var keyCode: UInt32
+    /// Carbon modifier flags (cmdKey | shiftKey | optionKey | controlKey).
+    var modifiers: UInt32
+
+    /// Human-readable representation, e.g. "⌘⇧P".
+    var display: String {
+        var s = ""
+        if modifiers & UInt32(Hotkey.controlKeyMask) != 0 { s += "⌃" }
+        if modifiers & UInt32(Hotkey.optionKeyMask) != 0 { s += "⌥" }
+        if modifiers & UInt32(Hotkey.shiftKeyMask) != 0 { s += "⇧" }
+        if modifiers & UInt32(Hotkey.cmdKeyMask) != 0 { s += "⌘" }
+        s += Hotkey.keyName(for: keyCode)
+        return s
+    }
+
+    // Carbon modifier masks (avoid importing Carbon everywhere).
+    static let cmdKeyMask: Int = 1 << 8
+    static let shiftKeyMask: Int = 1 << 9
+    static let optionKeyMask: Int = 1 << 11
+    static let controlKeyMask: Int = 1 << 12
+
+    /// Maps common virtual key codes to display characters.
+    static func keyName(for code: UInt32) -> String {
+        if let s = keyMap[code] { return s }
+        return "?"
+    }
+
+    private static let keyMap: [UInt32: String] = [
+        0: "A", 11: "B", 8: "C", 2: "D", 14: "E", 3: "F", 5: "G", 4: "H",
+        34: "I", 38: "J", 40: "K", 37: "L", 46: "M", 45: "N", 31: "O", 35: "P",
+        12: "Q", 15: "R", 1: "S", 17: "T", 32: "U", 9: "V", 13: "W", 7: "X",
+        16: "Y", 6: "Z",
+        29: "0", 18: "1", 19: "2", 20: "3", 21: "4", 23: "5", 22: "6", 26: "7",
+        28: "8", 25: "9",
+        49: "Space", 36: "↩", 48: "⇥", 53: "⎋",
+        123: "←", 124: "→", 125: "↓", 126: "↑",
+        122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6",
+        98: "F7", 100: "F8", 101: "F9", 109: "F10", 103: "F11", 111: "F12",
+        27: "-", 24: "=", 33: "[", 30: "]", 41: ";", 39: "'", 43: ",",
+        47: ".", 44: "/", 50: "`", 42: "\\",
+    ]
+}
+
 /// A unit of AI work the user can run on selected text.
 struct TaskDef: Identifiable, Codable, Hashable {
     var id: String
@@ -8,30 +54,57 @@ struct TaskDef: Identifiable, Codable, Hashable {
     var icon: String
     /// Instruction sent to the model. The selected text is appended separately.
     var instruction: String
-    /// Built-in tasks ship with the app and cannot be deleted.
+    /// Built-in tasks ship with the app by default. Users may still edit or
+    /// delete them; this flag only marks their origin.
     var isBuiltin: Bool
+    /// When true the task is offered as a dedicated icon button in the popup's
+    /// compact action bar (in addition to always appearing in the Tasks menu).
+    var showInPopup: Bool
+    /// Optional global shortcut that runs the task on the current selection.
+    var hotkey: Hotkey?
 
     init(id: String = UUID().uuidString,
          name: String,
          icon: String,
          instruction: String,
-         isBuiltin: Bool = false) {
+         isBuiltin: Bool = false,
+         showInPopup: Bool = false,
+         hotkey: Hotkey? = nil) {
         self.id = id
         self.name = name
         self.icon = icon
         self.instruction = instruction
         self.isBuiltin = isBuiltin
+        self.showInPopup = showInPopup
+        self.hotkey = hotkey
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, icon, instruction, isBuiltin, showInPopup, hotkey
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        icon = try c.decode(String.self, forKey: .icon)
+        instruction = try c.decode(String.self, forKey: .instruction)
+        isBuiltin = (try? c.decodeIfPresent(Bool.self, forKey: .isBuiltin)) ?? false ?? false
+        showInPopup = (try? c.decodeIfPresent(Bool.self, forKey: .showInPopup)) ?? false ?? false
+        hotkey = (try? c.decodeIfPresent(Hotkey.self, forKey: .hotkey)) ?? nil
     }
 }
 
 extension TaskDef {
+    /// The default task set seeded on first launch. Users can edit, reorder via
+    /// add/delete, or remove any of these afterwards.
     static let builtins: [TaskDef] = [
         TaskDef(id: "proofread", name: "Proofread", icon: "checkmark.seal",
                 instruction: "Proofread the text. Fix spelling, grammar, and punctuation while preserving the original meaning and tone.",
-                isBuiltin: true),
+                isBuiltin: true, showInPopup: true),
         TaskDef(id: "rewrite", name: "Rewrite", icon: "pencil.and.outline",
                 instruction: "Rewrite the text to improve clarity and flow while keeping the original meaning.",
-                isBuiltin: true),
+                isBuiltin: true, showInPopup: true),
         TaskDef(id: "synonyms", name: "Use synonyms", icon: "arrow.triangle.2.circlepath",
                 instruction: "Rewrite the text replacing words with suitable synonyms, keeping the same meaning and tone.",
                 isBuiltin: true),

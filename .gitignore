@@ -1,4 +1,5 @@
 .build/
+.swiftpm/
 dist/
 bridge/node_modules/
 bridge/*.log

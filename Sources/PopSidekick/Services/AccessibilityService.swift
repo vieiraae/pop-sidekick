@@ -59,7 +59,7 @@ enum AccessibilityService {
            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return .selection(Selection(text: text,
                                         bounds: selectionBounds(for: axElement),
-                                        isEditable: isEditable(axElement)))
+                                        isEditable: true))
         }
 
         // The element supports a selected-text attribute (so it's a text
@@ -85,19 +85,10 @@ enum AccessibilityService {
         return nil
     }
 
-    /// Whether the focused text element accepts edits to its selected text.
-    private static func isEditable(_ element: AXUIElement) -> Bool {
-        var settable: DarwinBoolean = false
-        if AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
-           settable.boolValue {
-            return true
-        }
-        if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
-           settable.boolValue {
-            return true
-        }
-        return false
-    }
+    /// Whether the focused text element accepts edits. Selections are always
+    /// treated as editable so the full action set (Paste / AI tasks that write
+    /// back) is offered everywhere — robustly detecting editability across
+    /// WebKit / Chromium / Electron apps proved unreliable.
 
     /// Computes the screen rectangle covering the current selection range.
     private static func selectionBounds(for element: AXUIElement) -> CGRect? {
@@ -124,9 +115,23 @@ enum AccessibilityService {
 
     // MARK: - Clipboard keystrokes
 
+    /// Timestamp of the most recently synthesized keystroke. The global
+    /// selection monitor checks `isSynthesizingKeystroke` so it can ignore the
+    /// `keyUp` events our own Cut/Copy/Paste (and the copy-based selection
+    /// capture) generate — otherwise the synthetic ⌘C re-probes, finds no
+    /// selection in read-only contexts, and hides the just-shown popup.
+    private(set) static var lastSyntheticKeyTime: Date = .distantPast
+    static var isSynthesizingKeystroke: Bool {
+        Date().timeIntervalSince(lastSyntheticKeyTime) < 0.3
+    }
+
     static func copy() { sendCommandKey(0x08) }   // C
     static func cut() { sendCommandKey(0x07) }     // X
     static func paste() { sendCommandKey(0x09) }   // V
+    /// Paste and Match Style (⌘⌥⇧V).
+    static func pasteAndMatchStyle() {
+        sendCommandKey(0x09, extraFlags: [.maskAlternate, .maskShift])
+    }
 
     /// Places `text` on the pasteboard and pastes it into the frontmost app.
     static func pasteText(_ text: String) {
@@ -139,13 +144,15 @@ enum AccessibilityService {
         }
     }
 
-    /// Synthesizes Command + the given key code down/up.
-    private static func sendCommandKey(_ keyCode: CGKeyCode) {
+    /// Synthesizes Command (+ optional extra modifiers) + the given key code.
+    private static func sendCommandKey(_ keyCode: CGKeyCode, extraFlags: CGEventFlags = []) {
         guard let source = CGEventSource(stateID: .combinedSessionState) else { return }
+        let flags: CGEventFlags = [.maskCommand, extraFlags]
         let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
-        down?.flags = .maskCommand
+        down?.flags = flags
         let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
-        up?.flags = .maskCommand
+        up?.flags = flags
+        lastSyntheticKeyTime = Date()
         down?.post(tap: .cghidEventTap)
         up?.post(tap: .cghidEventTap)
     }

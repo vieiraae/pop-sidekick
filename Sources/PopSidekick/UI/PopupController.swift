@@ -8,6 +8,10 @@ import Combine
 final class PopupController: NSObject {
     static var shared: PopupController?
 
+    /// Called whenever the popup is fully hidden, so the selection monitor can
+    /// clear its dedupe state (otherwise re-selecting the same text is ignored).
+    var onHidden: (() -> Void)?
+
     private let panel = PopupPanel()
     private var hostingController: NSHostingController<PopupRootView>?
     private var viewModel: PopupViewModel?
@@ -16,6 +20,9 @@ final class PopupController: NSObject {
     private var outsideMonitor: Any?
     private var escMonitor: Any?
     private var anchor: NSPoint = .zero
+    /// Selection rectangle in screen coordinates (top-left origin), when known,
+    /// so the popup can flip above the *top* of the selection (not its bottom).
+    private var selectionBounds: CGRect?
 
     override init() {
         super.init()
@@ -29,12 +36,12 @@ final class PopupController: NSObject {
     /// open menu hanging below the bar still counts as "inside".
     func popupContains(_ point: NSPoint) -> Bool {
         guard panel.isVisible else { return false }
-        return panel.frame.insetBy(dx: -8, dy: -8).contains(point)
+        return panel.frame.insetBy(dx: -Metrics.popupInset, dy: -Metrics.popupInset).contains(point)
     }
 
     // MARK: - Presentation
 
-    func show(text: String, at point: NSPoint, isEditable: Bool = true) {
+    func show(text: String, at point: NSPoint, isEditable: Bool = true, selectionBounds: CGRect? = nil) {
         // If the same selection is already on screen, don't rebuild the popup.
         // Recreating the hosting controller swaps the content view and would
         // tear down an open menu/popover (making it flash and vanish).
@@ -44,6 +51,7 @@ final class PopupController: NSObject {
             return
         }
         anchor = point
+        self.selectionBounds = selectionBounds
         let vm = PopupViewModel()
         vm.configure(with: text, isEditable: isEditable)
         vm.sourceApp = NSWorkspace.shared.frontmostApplication
@@ -66,7 +74,7 @@ final class PopupController: NSObject {
         // the expand/collapse animation settles.
         modeObservation = vm.$mode
             .sink { [weak self] _ in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.38) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Metrics.reflowDelay) {
                     guard let self, let ctrl = self.hostingController else { return }
                     self.resizeAndReposition(to: ctrl.preferredContentSize)
                 }
@@ -82,11 +90,28 @@ final class PopupController: NSObject {
         // Manual invocation: read selection if available, else show an empty editor.
         if let selection = AccessibilityService.currentSelection() {
             let point = NSEvent.mouseLocation
-            show(text: selection.text, at: point, isEditable: selection.isEditable)
+            show(text: selection.text, at: point, isEditable: selection.isEditable, selectionBounds: selection.bounds)
             viewModel?.expandToEdit()
         } else {
             show(text: "", at: NSEvent.mouseLocation)
             viewModel?.expandToEdit()
+        }
+    }
+
+    /// Runs a task on the current selection, triggered by its global hotkey.
+    /// Captures the selection (AX first, copy fallback), shows the compact popup
+    /// at the cursor, and immediately runs the task (writing the result back).
+    func runTaskOnSelection(_ task: TaskDef) {
+        if let selection = AccessibilityService.currentSelection(),
+           !selection.text.isEmpty {
+            show(text: selection.text, at: NSEvent.mouseLocation, isEditable: selection.isEditable, selectionBounds: selection.bounds)
+            viewModel?.run(task: task)
+            return
+        }
+        AccessibilityService.captureSelectionViaCopy { [weak self] text in
+            guard let self, let text, !text.isEmpty else { return }
+            self.show(text: text, at: NSEvent.mouseLocation, isEditable: true)
+            self.viewModel?.run(task: task)
         }
     }
 
@@ -100,6 +125,7 @@ final class PopupController: NSObject {
         panel.contentViewController = nil
         hostingController = nil
         viewModel = nil
+        onHidden?()
     }
 
     /// Hides the popup when the source selection is cleared (e.g. the user
@@ -132,14 +158,29 @@ final class PopupController: NSObject {
             return
         }
         let visible = screen.visibleFrame
-        let gap: CGFloat = 6
+        let gap = Metrics.selectionGap
 
-        // Prefer placing the popup just below the selection anchor; flip above
-        // if there isn't room below.
+        // Selection edges in AppKit (bottom-left origin) coordinates, derived
+        // from the AX bounds when available so we can avoid covering the text.
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? screen.frame.maxY
+        let selBottom: CGFloat
+        let selTop: CGFloat
+        if let b = selectionBounds {
+            selBottom = primaryHeight - b.maxY
+            selTop = primaryHeight - b.minY
+        } else {
+            // No bounds (keyboard / copy-fallback selections): approximate a
+            // single text line around the anchor so the flipped popup clears it.
+            selBottom = anchor.y
+            selTop = anchor.y + 20
+        }
+
+        // Prefer placing the popup just below the selection; if there isn't room
+        // below, flip it above the *top* of the selection so the text stays visible.
         var originX = anchor.x
-        var originY = anchor.y - gap - size.height
+        var originY = selBottom - gap - size.height
         if originY < visible.minY + 4 {
-            originY = anchor.y + gap
+            originY = selTop + gap
         }
 
         // Always clamp fully inside the visible frame so the (possibly tall,
