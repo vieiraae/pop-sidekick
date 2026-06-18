@@ -55,13 +55,9 @@ Grab the latest **`Pop Sidekick <version>.dmg`** from the
 [Releases page](../../releases), open it, and drag **Pop Sidekick** onto
 **Applications** — no toolchain or build required.
 
-Because the app is self-signed (not notarized), the first launch needs a
-one-time Gatekeeper bypass: **right-click** (or Control-click) **Pop Sidekick**
-in Applications → **Open** → **Open**. Or clear the quarantine flag once:
-
-```bash
-xattr -dr com.apple.quarantine "/Applications/Pop Sidekick.app"
-```
+The released DMG is **signed with an Apple Developer ID and notarized by Apple**,
+so it opens with no Gatekeeper warning. On first launch, grant **Accessibility**
+when prompted (see below).
 
 ### From source: one command
 
@@ -155,16 +151,14 @@ your exact identity string with `security find-identity -p codesigning -v`.
 ### Installing (for end users)
 
 1. Open the `.dmg` and drag **Pop Sidekick** onto the **Applications** folder.
-2. The app is self-signed, not notarized, so the first launch needs a one-time
-   Gatekeeper bypass: **right-click** (or Control-click) **Pop Sidekick** in
-   Applications → **Open** → **Open** in the dialog. (Plain double-click shows a
-   "cannot be opened" warning the first time.)
-
-Alternatively, clear the quarantine flag from Terminal:
-
-```bash
-     xattr -dr com.apple.quarantine "/Applications/Pop Sidekick.app"
-```
+2. If the DMG was **signed + notarized** (as the official Releases are), it opens
+   normally — just double-click. If you distributed an **unsigned local build**
+   instead, the first launch needs a one-time Gatekeeper bypass: **right-click**
+   (or Control-click) **Pop Sidekick** in Applications → **Open** → **Open**.
+   Alternatively clear the quarantine flag once:
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Pop Sidekick.app"
+   ```
 
 3. Grant **Accessibility** when prompted (System Settings → Privacy & Security →
    Accessibility), then open it from **Settings → General → Permissions**.
