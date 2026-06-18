@@ -1,0 +1,6 @@
+.build/
+dist/
+bridge/node_modules/
+bridge/*.log
+*.xcodeproj
+.DS_Store
