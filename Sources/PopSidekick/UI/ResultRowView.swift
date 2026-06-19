@@ -28,8 +28,10 @@ struct ResultRowView: View {
                     copied = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { copied = false }
                 }
-                IconButton(systemName: "clipboard", help: "Paste") {
-                    vm.paste(item.text, style: .source)
+                if vm.isEditable {
+                    IconButton(systemName: "clipboard", help: "Paste") {
+                        vm.paste(item.text, style: .source)
+                    }
                 }
             }
             Text(renderedText)

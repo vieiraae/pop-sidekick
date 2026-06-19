@@ -99,20 +99,13 @@ final class PopupController: NSObject {
     }
 
     /// Runs a task on the current selection, triggered by its global hotkey.
-    /// Captures the selection (AX first, copy fallback), shows the compact popup
-    /// at the cursor, and immediately runs the task (writing the result back).
+    /// Reads the selection via the Accessibility API (never the clipboard),
+    /// shows the compact popup at the cursor, and runs the task immediately.
     func runTaskOnSelection(_ task: TaskDef) {
-        if let selection = AccessibilityService.currentSelection(),
-           !selection.text.isEmpty {
-            show(text: selection.text, at: NSEvent.mouseLocation, isEditable: selection.isEditable, selectionBounds: selection.bounds)
-            viewModel?.run(task: task)
-            return
-        }
-        AccessibilityService.captureSelectionViaCopy { [weak self] text in
-            guard let self, let text, !text.isEmpty else { return }
-            self.show(text: text, at: NSEvent.mouseLocation, isEditable: true)
-            self.viewModel?.run(task: task)
-        }
+        guard let selection = AccessibilityService.currentSelection(),
+              !selection.text.isEmpty else { return }
+        show(text: selection.text, at: NSEvent.mouseLocation, isEditable: selection.isEditable, selectionBounds: selection.bounds)
+        viewModel?.run(task: task)
     }
 
     func hide() {

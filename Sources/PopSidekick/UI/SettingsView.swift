@@ -455,7 +455,7 @@ private struct AdvancedSettings: View {
         Form {
             Section("Security") {
                 Toggle("Automatically approve tool requests", isOn: $store.settings.autoApproveTools)
-                Text("When on, Copilot may run tools, MCP servers, and skills without asking. Turn off to reject all tool use (AI tasks still work for plain text transforms).")
+                Text("When on, Copilot may run tools, MCP servers, and skills without asking. Because prompts include the text you select (which can come from untrusted pages), leaving this off is safer. Turn off to reject all tool use (AI tasks still work for plain text transforms).")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

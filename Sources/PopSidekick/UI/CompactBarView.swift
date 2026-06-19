@@ -71,14 +71,12 @@ struct CompactBarView: View {
             historyMenu
             bookmarksMenu
 
-            if vm.isEditable {
-                VBar()
+            VBar()
 
-                ForEach(vm.popupTasks) { task in
-                    IconButton(systemName: task.icon, help: task.name) { vm.run(task: task) }
-                }
-                tasksMenu
+            ForEach(vm.popupTasks) { task in
+                IconButton(systemName: task.icon, help: task.name) { vm.activateTask(task) }
             }
+            tasksMenu
 
             VBar()
 
@@ -101,17 +99,21 @@ struct CompactBarView: View {
             } else {
                 ForEach(clipboard.history) { item in
                     Menu {
-                        Button("Paste") { vm.paste(item.content, style: .source) }
-                        if item.isImage {
-                            Button("Paste Extracted Text") { vm.extractTextFromImage(item) }
-                        }
-                        if item.hasRichText {
-                            Button("Paste and Match Style") { vm.paste(item.content, style: .matchStyle) }
-                        }
-                        if !item.isImage {
-                            Button(item.isFile ? "Paste Path as Text" : "Paste as Plain Text") {
-                                vm.paste(item.content, style: .plainText)
+                        if vm.isEditable {
+                            Button("Paste") { vm.paste(item.content, style: .source) }
+                            if item.isImage {
+                                Button("Paste Extracted Text") { vm.extractTextFromImage(item) }
                             }
+                            if item.hasRichText {
+                                Button("Paste and Match Style") { vm.paste(item.content, style: .matchStyle) }
+                            }
+                            if !item.isImage {
+                                Button(item.isFile ? "Paste Path as Text" : "Paste as Plain Text") {
+                                    vm.paste(item.content, style: .plainText)
+                                }
+                            }
+                        } else {
+                            Button("Copy") { vm.copy(item.content, style: .source) }
                         }
                         Divider()
                         Button(item.bookmarked ? "Bookmarked" : "Bookmark") {
@@ -124,7 +126,11 @@ struct CompactBarView: View {
                     } label: {
                         clipItemLabel(item)
                     } primaryAction: {
-                        vm.paste(item.content, style: .source)
+                        if vm.isEditable {
+                            vm.paste(item.content, style: .source)
+                        } else {
+                            vm.copy(item.content, style: .source)
+                        }
                     }
                 }
                 Divider()
@@ -148,17 +154,21 @@ struct CompactBarView: View {
             } else {
                 ForEach(clipboard.bookmarks) { item in
                     Menu {
-                        Button("Paste") { vm.paste(item.content, style: .source) }
-                        if item.isImage {
-                            Button("Paste Extracted Text") { vm.extractTextFromImage(item) }
-                        }
-                        if item.hasRichText {
-                            Button("Paste and Match Style") { vm.paste(item.content, style: .matchStyle) }
-                        }
-                        if !item.isImage {
-                            Button(item.isFile ? "Paste Path as Text" : "Paste as Plain Text") {
-                                vm.paste(item.content, style: .plainText)
+                        if vm.isEditable {
+                            Button("Paste") { vm.paste(item.content, style: .source) }
+                            if item.isImage {
+                                Button("Paste Extracted Text") { vm.extractTextFromImage(item) }
                             }
+                            if item.hasRichText {
+                                Button("Paste and Match Style") { vm.paste(item.content, style: .matchStyle) }
+                            }
+                            if !item.isImage {
+                                Button(item.isFile ? "Paste Path as Text" : "Paste as Plain Text") {
+                                    vm.paste(item.content, style: .plainText)
+                                }
+                            }
+                        } else {
+                            Button("Copy") { vm.copy(item.content, style: .source) }
                         }
                         Divider()
                         Button("Unbookmark") { clipboard.unbookmark(item) }
@@ -169,7 +179,11 @@ struct CompactBarView: View {
                     } label: {
                         clipItemLabel(item)
                     } primaryAction: {
-                        vm.paste(item.content, style: .source)
+                        if vm.isEditable {
+                            vm.paste(item.content, style: .source)
+                        } else {
+                            vm.copy(item.content, style: .source)
+                        }
                     }
                 }
             }
@@ -227,7 +241,7 @@ struct CompactBarView: View {
         Menu {
             ForEach(vm.allTasks) { task in
                 Button {
-                    vm.run(task: task)
+                    vm.activateTask(task)
                 } label: {
                     Label(task.name, systemImage: task.icon)
                 }

@@ -163,7 +163,9 @@ struct AppSettings: Codable {
     var runTimeoutSeconds: Int = 120
     /// Whether the bridge auto-approves tool/MCP/skill permission requests.
     /// When false, tool use is rejected (the headless bridge can't prompt).
-    var autoApproveTools: Bool = true
+    /// Defaults to OFF: AI prompts are built from untrusted selected text, so
+    /// auto-approving tool execution would be a prompt-injection risk.
+    var autoApproveTools: Bool = false
     /// Set once the first-run onboarding has been completed/dismissed.
     var hasCompletedOnboarding: Bool = false
 
@@ -317,11 +319,18 @@ final class SettingsStore: ObservableObject {
         } else {
             self.settings = AppSettings()
         }
+        // Tighten permissions on a pre-existing settings file (may hold BYOK
+        // secrets) written before this hardening.
+        if fm.fileExists(atPath: url.path) {
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
     }
 
     private func save() {
         guard let data = try? JSONEncoder().encode(settings) else { return }
         try? data.write(to: url, options: .atomic)
+        // Settings may hold BYOK API keys/tokens — restrict to the owner.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     /// Expands a leading ~ to the user's home directory.

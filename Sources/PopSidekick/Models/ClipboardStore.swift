@@ -85,9 +85,20 @@ final class ClipboardStore: ObservableObject {
         load()
     }
 
+    /// Prefix of sentinel strings written by a previous version's copy-based
+    /// selection capture. Kept only to purge any such entries persisted before
+    /// that mechanism was removed.
+    private static let legacySentinelPrefix = "__popsidekick_sentinel_"
+
     private func load() {
-        history = loadItems(from: historyURL)
-        bookmarks = loadItems(from: bookmarksURL)
+        history = loadItems(from: historyURL).filter { !$0.text.hasPrefix(Self.legacySentinelPrefix) }
+        bookmarks = loadItems(from: bookmarksURL).filter { !$0.text.hasPrefix(Self.legacySentinelPrefix) }
+        // Tighten permissions on any pre-existing stores written before this
+        // hardening, since they may contain content copied from sensitive apps.
+        let fm = FileManager.default
+        for url in [historyURL, bookmarksURL] where fm.fileExists(atPath: url.path) {
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
     }
 
     /// Decodes a clip array, hydrating external image bytes. A file that exists
@@ -125,9 +136,11 @@ final class ClipboardStore: ObservableObject {
     private func persistNow() {
         if let data = try? JSONEncoder().encode(history) {
             try? data.write(to: historyURL, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: historyURL.path)
         }
         if let data = try? JSONEncoder().encode(bookmarks) {
             try? data.write(to: bookmarksURL, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: bookmarksURL.path)
         }
         collectOrphanImages()
     }

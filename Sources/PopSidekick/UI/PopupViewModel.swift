@@ -183,6 +183,13 @@ final class PopupViewModel: ObservableObject {
         RichContent.fromMarkdown(text).write(to: NSPasteboard.general, style: .source)
     }
 
+    /// Copies clipboard-history / bookmark content to the system clipboard
+    /// without pasting. Used in read-only contexts where Paste isn't available.
+    func copy(_ content: RichContent, style: PasteStyle = .source) {
+        content.write(to: NSPasteboard.general, style: style)
+        if !pinned { onRequestClose?() }
+    }
+
     /// Opens the detected URL in the default browser, then closes (unless pinned).
     func openDetectedURL() {
         guard let url = detectedURL else { return }
@@ -202,6 +209,20 @@ final class PopupViewModel: ObservableObject {
     func run(task: TaskDef) {
         let prompt = buildPrompt(instruction: task.instruction, text: selectedText, includeStyling: false)
         startRun(prompt: prompt, replace: isEditable, statusLabel: "\(task.name)…")
+    }
+
+    /// Handles a task button/menu selection from the compact bar. For editable
+    /// selections it runs the task inline (replacing the text). For read-only
+    /// selections it opens the editor with the task preselected and runs it
+    /// automatically, producing a result the user can copy/paste.
+    func activateTask(_ task: TaskDef) {
+        if isEditable {
+            run(task: task)
+        } else {
+            taskID = task.id
+            expandToEdit()
+            runEdit()
+        }
     }
 
     /// Extracts the text from an image clipboard item using Copilot (OCR) and
@@ -230,15 +251,24 @@ final class PopupViewModel: ObservableObject {
         startRun(prompt: prompt, statusLabel: task.map { "\($0.name)…" } ?? "Working…")
     }
 
-    /// Runs the free-form prompt: the user's instruction transforms the
-    /// selected text. Mirrors quick-task behaviour — shows the compact
-    /// processing bar and replaces the selection automatically when editable.
+    /// Runs the free-form prompt. For editable selections it mirrors quick-task
+    /// behaviour — shows the compact processing bar and replaces the selection.
+    /// For read-only selections it opens the editor with the prompt placed in the
+    /// additional-instructions field and runs it automatically, so the result
+    /// lands in the editor where it can be copied/pasted.
     func runPrompt() {
         let instruction = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !instruction.isEmpty else { return }
-        let prompt = buildPrompt(instruction: instruction, text: selectedText, includeStyling: false)
-        mode = .compact
-        startRun(prompt: prompt, replace: isEditable, statusLabel: instruction)
+        if isEditable {
+            let prompt = buildPrompt(instruction: instruction, text: selectedText, includeStyling: false)
+            mode = .compact
+            startRun(prompt: prompt, replace: true, statusLabel: instruction)
+        } else {
+            taskID = nil
+            extraInstructions = instruction
+            expandToEdit()
+            runEdit()
+        }
     }
 
     private func buildPrompt(instruction: String?, text: String, includeStyling: Bool) -> String {

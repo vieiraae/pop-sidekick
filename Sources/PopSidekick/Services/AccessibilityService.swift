@@ -44,6 +44,15 @@ enum AccessibilityService {
 
     /// Probes the focused UI element to classify its selection state.
     static func probeSelection() -> SelectionProbe {
+        // Wake up the accessibility tree of Chromium/Electron/WebKit apps so they
+        // expose `AXSelectedText` (and text-marker ranges) without us having to
+        // synthesize ⌘C. By default those apps publish only a shallow AX tree;
+        // setting `AXManualAccessibility`/`AXEnhancedUserInterface` on the app
+        // element makes them build the full tree, exactly as VoiceOver does.
+        if let app = NSWorkspace.shared.frontmostApplication {
+            enableEnhancedAccessibility(for: app.processIdentifier)
+        }
+
         let system = AXUIElementCreateSystemWide()
         var focused: CFTypeRef?
         guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
@@ -59,7 +68,16 @@ enum AccessibilityService {
            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return .selection(Selection(text: text,
                                         bounds: selectionBounds(for: axElement),
-                                        isEditable: true))
+                                        isEditable: isEditable(axElement)))
+        }
+
+        // WebKit/Chromium web content often exposes the selection through a text
+        // *marker* range rather than `AXSelectedText`. Resolve it to a string.
+        if let markerText = selectedTextViaMarkerRange(for: axElement),
+           !markerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .selection(Selection(text: markerText,
+                                        bounds: selectionBounds(for: axElement),
+                                        isEditable: isEditable(axElement)))
         }
 
         // The element supports a selected-text attribute (so it's a text
@@ -79,18 +97,92 @@ enum AccessibilityService {
         return .noSelectionInfo
     }
 
+    /// Determines whether the focused element accepts edits, so the popup can
+    /// offer write actions (Cut, Paste, replace-on-task) only where they apply.
+    ///
+    /// Now that the AX tree is awake (see `enableEnhancedAccessibility`), this is
+    /// reliable across native, WebKit, and Chromium/Electron apps: the value
+    /// attribute is settable on real text inputs (`<input>`, `<textarea>`,
+    /// `contenteditable`, native fields) and not on static/read-only content.
+    private static func isEditable(_ element: AXUIElement) -> Bool {
+        // Primary signal: is the element's value writable?
+        var settable: DarwinBoolean = false
+        if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
+           settable.boolValue {
+            return true
+        }
+
+        // Secondary signal: the element's role denotes a text input.
+        var roleValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue) == .success,
+           let role = roleValue as? String {
+            switch role {
+            case kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole, "AXSearchField":
+                return true
+            default:
+                break
+            }
+        }
+
+        return false
+    }
+
+    // MARK: - Enhanced accessibility (Chromium / Electron / WebKit)
+
+    /// Apps whose accessibility tree we've already requested, so we only set the
+    /// attributes once per process.
+    private static var enhancedAccessibilityPIDs: Set<pid_t> = []
+
+    /// Private/undocumented AX attributes that ask Chromium- and AppKit-based
+    /// apps to expose their full accessibility tree on demand.
+    private static let kAXManualAccessibility = "AXManualAccessibility" as CFString
+    private static let kAXEnhancedUserInterface = "AXEnhancedUserInterface" as CFString
+
+    /// Requests that the given application expose its full accessibility tree.
+    /// Chromium/Electron respond to `AXManualAccessibility`; some AppKit apps
+    /// respond to `AXEnhancedUserInterface`. Both are best-effort and safe to
+    /// set even on apps that ignore them.
+    static func enableEnhancedAccessibility(for pid: pid_t) {
+        guard !enhancedAccessibilityPIDs.contains(pid) else { return }
+        enhancedAccessibilityPIDs.insert(pid)
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetAttributeValue(appElement, kAXManualAccessibility, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(appElement, kAXEnhancedUserInterface, kCFBooleanTrue)
+    }
+
+    /// Resolves the selection of a WebKit/Chromium element via its text-marker
+    /// range (`AXSelectedTextMarkerRange` → `AXStringForTextMarkerRange`).
+    private static func selectedTextViaMarkerRange(for element: AXUIElement) -> String? {
+        let selectedRangeAttr = "AXSelectedTextMarkerRange" as CFString
+        let stringForRangeAttr = "AXStringForTextMarkerRange" as CFString
+
+        var markerRange: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, selectedRangeAttr, &markerRange) == .success,
+              let range = markerRange
+        else { return nil }
+
+        var stringValue: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(element, stringForRangeAttr, range, &stringValue) == .success
+        else { return nil }
+        return stringValue as? String
+    }
+
     /// Returns the currently selected text in the focused UI element, if any.
     static func currentSelection() -> Selection? {
         if case .selection(let selection) = probeSelection() { return selection }
         return nil
     }
 
-    /// Whether the focused text element accepts edits. Selections are always
-    /// treated as editable so the full action set (Paste / AI tasks that write
-    /// back) is offered everywhere — robustly detecting editability across
-    /// WebKit / Chromium / Electron apps proved unreliable.
-
     /// Computes the screen rectangle covering the current selection range.
+    /// Only the standard `AXSelectedTextRange` geometry is used here. Web content
+    /// (WebKit/Chromium) reports geometry through text-marker ranges in an
+    /// inconsistent coordinate space, so we deliberately return `nil` there and
+    /// let the popup anchor at the mouse location instead.
+    /// Computes the screen rectangle covering the current selection range, in AX
+    /// (top-left origin) coordinates. Returns `nil` when no reliable geometry is
+    /// available — including web content (WebKit/Chromium), whose `AXBoundsForRange`
+    /// reports coordinates inconsistent with the element's own window. The popup
+    /// then anchors at the mouse location instead of a bogus position.
     private static func selectionBounds(for element: AXUIElement) -> CGRect? {
         var rangeValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeValue) == .success,
@@ -107,19 +199,47 @@ enum AccessibilityService {
         guard result == .success, let boundsRef = boundsValue else { return nil }
 
         var rect = CGRect.zero
-        if AXValueGetValue(boundsRef as! AXValue, .cgRect, &rect) {
-            return rect.width.isFinite && rect.height.isFinite ? rect : nil
+        guard AXValueGetValue(boundsRef as! AXValue, .cgRect, &rect),
+              rect.width.isFinite, rect.height.isFinite, rect != .zero
+        else { return nil }
+
+        // Sanity-check against the element's own window (same AX coordinate
+        // space). WebKit/Chromium report selection bounds that fall outside the
+        // window, which would otherwise place the popup at the screen bottom.
+        if let window = windowFrame(of: element), !window.insetBy(dx: -4, dy: -4).intersects(rect) {
+            return nil
         }
-        return nil
+        return rect
+    }
+
+    /// The frame of the window containing `element`, in AX (top-left) coordinates.
+    private static func windowFrame(of element: AXUIElement) -> CGRect? {
+        var windowValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &windowValue) == .success,
+              let windowRef = windowValue
+        else { return nil }
+        let window = windowRef as! AXUIElement
+
+        var posValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success
+        else { return nil }
+
+        var origin = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posValue as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
+        else { return nil }
+        return CGRect(origin: origin, size: size)
     }
 
     // MARK: - Clipboard keystrokes
 
     /// Timestamp of the most recently synthesized keystroke. The global
     /// selection monitor checks `isSynthesizingKeystroke` so it can ignore the
-    /// `keyUp` events our own Cut/Copy/Paste (and the copy-based selection
-    /// capture) generate — otherwise the synthetic ⌘C re-probes, finds no
-    /// selection in read-only contexts, and hides the just-shown popup.
+    /// `keyUp` events our own Cut/Copy/Paste actions generate — otherwise they
+    /// would trigger an immediate re-probe of the selection.
     private(set) static var lastSyntheticKeyTime: Date = .distantPast
     static var isSynthesizingKeystroke: Bool {
         Date().timeIntervalSince(lastSyntheticKeyTime) < 0.3
@@ -155,52 +275,5 @@ enum AccessibilityService {
         lastSyntheticKeyTime = Date()
         down?.post(tap: .cghidEventTap)
         up?.post(tap: .cghidEventTap)
-    }
-
-    // MARK: - Copy-based selection capture (works in read-only contexts)
-
-    /// Captures the current selection by synthesizing ⌘C, reading the result,
-    /// and then restoring the previous pasteboard contents. This works in apps
-    /// that don't expose `kAXSelectedText` (web pages, PDFs, read-only views).
-    static func captureSelectionViaCopy(completion: @escaping (String?) -> Void) {
-        let pb = NSPasteboard.general
-        let saved = snapshotPasteboard()
-        // Write a unique sentinel so we can reliably tell whether ⌘C actually
-        // replaced the pasteboard contents (changeCount alone can be unreliable).
-        let sentinel = "__popsidekick_sentinel_\(UUID().uuidString)__"
-        pb.clearContents()
-        pb.setString(sentinel, forType: .string)
-        copy()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
-            let current = pb.string(forType: .string)
-            restorePasteboard(saved)
-            guard let current, current != sentinel else {
-                completion(nil)
-                return
-            }
-            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
-            completion(trimmed.isEmpty ? nil : current)
-        }
-    }
-
-    private static func snapshotPasteboard() -> [NSPasteboardItem] {
-        let pb = NSPasteboard.general
-        return pb.pasteboardItems?.map { item in
-            let copy = NSPasteboardItem()
-            for type in item.types {
-                if let data = item.data(forType: type) {
-                    copy.setData(data, forType: type)
-                }
-            }
-            return copy
-        } ?? []
-    }
-
-    private static func restorePasteboard(_ items: [NSPasteboardItem]) {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        if !items.isEmpty {
-            pb.writeObjects(items)
-        }
     }
 }

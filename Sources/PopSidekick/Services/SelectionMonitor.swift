@@ -5,9 +5,11 @@ import AppKit
 /// Strategy:
 /// 1. On a likely *selection gesture* (a mouse drag or a multi-click), read the
 ///    focused element's selected text via the Accessibility API.
-/// 2. If AX exposes no selection (common for read-only text, web pages, PDFs),
-///    fall back to a copy-based capture (synthesize Cmd+C, read, restore clipboard).
-/// 3. Keyboard selections (Shift+Arrows) are handled via AX only.
+/// 2. Chromium/Electron/WebKit apps are asked to expose their full AX tree on
+///    demand (see `AccessibilityService.enableEnhancedAccessibility`), so their
+///    selections are readable via AX too.
+/// 3. Selection is read purely via Accessibility — the clipboard is never used,
+///    so it stays untouched. Apps that expose no AX data simply get no popup.
 @MainActor
 final class SelectionMonitor {
     var onSelection: ((AccessibilityService.Selection, NSPoint) -> Void)?
@@ -28,6 +30,14 @@ final class SelectionMonitor {
     /// misses real selections. Polling a few times closes that gap.
     private let maxPollAttempts = 5
     private let pollInterval: TimeInterval = 0.07
+
+    /// Bumped on every `keyUp` so that a burst of typing coalesces into a single
+    /// live probe chain. Each scheduled keyboard probe captures the token value
+    /// at schedule time and bails the moment a newer keystroke supersedes it —
+    /// otherwise rapid typing stacks many overlapping 5-attempt AX probe chains
+    /// (each doing several synchronous cross-process AX queries) on the main
+    /// thread, even though plain typing never produces a selection.
+    private var keyProbeToken = 0
 
     func start() {
         guard monitor == nil else { return }
@@ -58,6 +68,12 @@ final class SelectionMonitor {
         case .leftMouseDown:
             if isPointInPopup?(NSEvent.mouseLocation) == true { return }
             mouseDownPoint = NSEvent.mouseLocation
+            // Ask the frontmost app (esp. Chromium/Electron) to expose its full
+            // accessibility tree now, so the selection is readable via AX by the
+            // time the drag finishes — no clipboard fallback needed.
+            if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                AccessibilityService.enableEnhancedAccessibility(for: pid)
+            }
         case .leftMouseUp:
             let up = NSEvent.mouseLocation
             // Ignore interactions with our own popup (opening menus, buttons).
@@ -66,14 +82,16 @@ final class SelectionMonitor {
             let isGesture = dragDistance > 4 || event.clickCount >= 2
             guard isGesture else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                self?.pollSelection(attempt: 0, allowCopyFallback: true)
+                self?.pollSelection(attempt: 0, fromMouse: true)
             }
         case .keyUp:
-            // Ignore the keyUp from our own synthesized ⌘C/⌘V/⌘X (e.g. the copy
-            // fallback), which would otherwise re-probe and hide the popup.
+            // Ignore the keyUp from our own synthesized Cut/Copy/Paste, which
+            // would otherwise re-probe the selection right after the action.
             if AccessibilityService.isSynthesizingKeystroke { return }
+            keyProbeToken &+= 1
+            let token = keyProbeToken
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                self?.pollSelection(attempt: 0, allowCopyFallback: false)
+                self?.pollSelection(attempt: 0, fromMouse: false, keyToken: token)
             }
         default:
             break
@@ -82,52 +100,40 @@ final class SelectionMonitor {
 
     /// Probes the focused element for a selection, retrying a few times to ride
     /// out Accessibility API lag. Emits as soon as a real selection appears;
-    /// only after all attempts come back empty does it clear or (for read-only
-    /// contexts) try the copy-based fallback.
-    private func pollSelection(attempt: Int, allowCopyFallback: Bool) {
+    /// only after all attempts come back empty does it clear. Selection is read
+    /// purely via the Accessibility API — the clipboard is never touched.
+    private func pollSelection(attempt: Int, fromMouse: Bool, keyToken: Int? = nil) {
         guard enabled else { return }
+        // A newer keystroke has superseded this keyboard probe chain — abandon it
+        // so overlapping chains don't pile up during fast typing.
+        if let keyToken, keyToken != keyProbeToken { return }
 
         let probe = AccessibilityService.probeSelection()
-        if case .selection(let selection) = probe {
-            emit(selection)
+        if case .selection(var selection) = probe {
+            // AX bounds from web content (WebKit/Chromium) come back in an
+            // inconsistent coordinate space and mislocate the popup. For
+            // mouse-driven selections the cursor is already at the selection, so
+            // drop the bounds and anchor at the mouse instead.
+            if fromMouse { selection.bounds = nil }
+            emit(selection, fromMouse: fromMouse)
             return
         }
 
         if attempt + 1 < maxPollAttempts {
             DispatchQueue.main.asyncAfter(deadline: .now() + pollInterval) { [weak self] in
-                self?.pollSelection(attempt: attempt + 1, allowCopyFallback: allowCopyFallback)
+                self?.pollSelection(attempt: attempt + 1, fromMouse: fromMouse, keyToken: keyToken)
             }
             return
         }
 
-        // No AX selection after retries.
-        switch probe {
-        case .noSelectionInfo where allowCopyFallback:
-            // Read-only / non-AX context (web page, PDF): fall back to copy.
-            copyFallback()
-        default:
-            // `.emptyEditable` (focused text element with nothing selected) or a
-            // keyboard event with no AX selection: do not copy-probe, since some
-            // apps copy the whole current line on an empty ⌘C.
-            clearIfNeeded()
-        }
+        clearIfNeeded()
     }
 
-    private func copyFallback() {
-        AccessibilityService.captureSelectionViaCopy { [weak self] text in
-            guard let self, self.enabled else { return }
-            guard let text, !text.isEmpty else {
-                self.clearIfNeeded()
-                return
-            }
-            self.emit(AccessibilityService.Selection(text: text, bounds: nil, isEditable: true))
-        }
-    }
-
-    private func emit(_ selection: AccessibilityService.Selection) {
+    private func emit(_ selection: AccessibilityService.Selection, fromMouse: Bool) {
         guard selection.text != lastText else { return }
         lastText = selection.text
-        onSelection?(selection, anchorPoint(for: selection))
+        let point = fromMouse ? NSEvent.mouseLocation : anchorPoint(for: selection)
+        onSelection?(selection, point)
     }
 
     private func clearIfNeeded() {
