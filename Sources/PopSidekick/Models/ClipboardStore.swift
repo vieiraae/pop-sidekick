@@ -32,6 +32,24 @@ struct ClipItem: Codable, Hashable, Identifiable {
                     url: linkURL.flatMap { URL(string: $0) })
     }
 
+    /// Cheap de-duplication identity, equivalent to `RichContent.dedupeKey` but
+    /// without re-hashing image bytes. For images the content SHA-256 is already
+    /// stored in `imageFile` (named "<sha256>.png"), so reuse it instead of
+    /// hashing the raw bytes again — the naive path recomputes the digest of
+    /// every stored image on every clipboard capture.
+    var dedupeKey: String {
+        if let filePaths, !filePaths.isEmpty {
+            return "file:\(filePaths.joined(separator: "|"))"
+        }
+        if let imageFile {
+            return "img:\((imageFile as NSString).deletingPathExtension)"
+        }
+        // No pre-hashed image file (e.g. an image not yet persisted) or a
+        // text/link item — fall back to the content-derived key, which only
+        // hashes when an in-memory image is present and is otherwise cheap.
+        return content.dedupeKey
+    }
+
     var kind: ClipKind { content.kind }
     var isImage: Bool { kind == .image }
     var isFile: Bool { kind == .file }
@@ -176,8 +194,11 @@ final class ClipboardStore: ObservableObject {
         if let bytes = item.imageData {
             item.imageFile = storeImage(bytes)
         }
-        let key = content.dedupeKey
-        if let idx = history.firstIndex(where: { $0.content.dedupeKey == key }) {
+        // Use the item's dedupe key (which reuses the already-computed image
+        // hash via `imageFile`) so matching existing items never re-hash their
+        // image bytes on every capture.
+        let key = item.dedupeKey
+        if let idx = history.firstIndex(where: { $0.dedupeKey == key }) {
             let existing = history.remove(at: idx)
             history.insert(existing, at: 0)
         } else {
