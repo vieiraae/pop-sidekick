@@ -20,6 +20,10 @@ final class SelectionMonitor {
 
     private var monitor: Any?
     private var lastText: String = ""
+    /// Text the user explicitly dismissed (e.g. via Esc). While the same text is
+    /// still selected, it must not re-trigger the popup; cleared as soon as a
+    /// different selection appears or the selection is cleared.
+    private var suppressedText: String?
     private var enabled = false
 
     private var mouseDownPoint: NSPoint = .zero
@@ -60,6 +64,14 @@ final class SelectionMonitor {
     func setEnabled(_ value: Bool) { enabled = value }
 
     func reset() { lastText = "" }
+
+    /// Suppresses re-showing the popup for `text` while it stays selected. Used
+    /// after an explicit Esc dismissal so the Esc keyUp (or an unchanged
+    /// selection) doesn't immediately reopen the popup.
+    func suppressReshow(of text: String) {
+        suppressedText = text
+        lastText = text
+    }
 
     private func handle(_ event: NSEvent) {
         guard enabled, SettingsStore.shared.settings.showPopupAutomatically else { return }
@@ -130,6 +142,12 @@ final class SelectionMonitor {
     }
 
     private func emit(_ selection: AccessibilityService.Selection, fromMouse: Bool) {
+        if let suppressed = suppressedText {
+            // The dismissed text is still selected — keep ignoring it. A genuinely
+            // different selection lifts the suppression.
+            if selection.text == suppressed { return }
+            suppressedText = nil
+        }
         guard selection.text != lastText else { return }
         lastText = selection.text
         let point = fromMouse ? NSEvent.mouseLocation : anchorPoint(for: selection)
@@ -137,6 +155,7 @@ final class SelectionMonitor {
     }
 
     private func clearIfNeeded() {
+        suppressedText = nil
         if !lastText.isEmpty {
             lastText = ""
             onSelectionCleared?()

@@ -9,23 +9,30 @@ that drives the Copilot SDK over NDJSON.
 
 ## Features
 
-- **Compact bar** on selection: Cut, Copy, Paste (source / match style / plain),
-  Clipboard history, Bookmarks, quick tasks, Tasks picker, **Ask Copilot**, Edit.
+- **Compact bar** on selection: Cut, Copy, Paste (adapts to clipboard content),
+  Clipboard, Bookmarks, Web search, quick tasks, Tasks picker, **Ask Copilot**,
+  Edit.
 - **Ask Copilot** — type how to transform the selection (e.g. "translate to
   Portuguese"), press ↩, result replaces the selection.
+- **Web search** — search the selection with your browser's engine; configurable
+  engines (Google, Bing, add your own via `%s`) with a default + dropdown.
 - **Read-only aware** — on non-editable text, write actions (Cut/Paste) are
   hidden; tasks open the editor and run automatically.
-- **Clipboard history & bookmarks** — text, rich text, images, files, links;
-  per-item paste variants, OCR for images, bookmark/edit/delete. Items copied
-  from password managers (concealed/transient) are never stored.
+- **Clipboard window** — a dedicated **History / Bookmarks** window (global
+  hotkey) for text, rich text, images, files, links. Double-click to paste;
+  hover-revealed per-item actions: paste, copy, OCR / open / save image,
+  **Edit with Copilot**, bookmark, delete. Compact image thumbnails expand into a
+  floating full-size preview on hover. Concealed/transient clips (password
+  managers) are never stored.
 - **Tasks** — Proofread, Rewrite, Synonyms, Minor/Major revise, Describe, Answer,
   Explain, Expand, Summarize, plus custom tasks; bindable to global hotkeys.
-- **Edit panel** — editable text, Task / Tone / Format / Length pickers, extra
-  instructions, model picker, choices slider. Each result: Refine, Copy, Paste.
+- **Edit panel** — editable text (or an image preview attached on Run), Task /
+  Tone / Format / Length pickers, extra instructions (↩ to run), model picker,
+  choices slider. Each result: Refine, Copy, Paste.
 - **Models** — Copilot models or **BYOK** (OpenAI, Azure, Anthropic, Ollama,
   Foundry Local, OpenAI-compatible) with per-model Test Connection.
-- **Pin** on top, animated border while working, **cancel** any time, onboarding
-  on first launch.
+- **Pin** on top, animated border while working, **cancel** any time, **Esc** to
+  dismiss, onboarding on first launch.
 
 ## Selection capture
 
@@ -72,7 +79,7 @@ swift build && swift run           # dev (uses bridge/ in the repo)
 ## Release (maintainers)
 
 ```bash
-./scripts/release.sh               # tags from the app version, e.g. v1.1.0
+./scripts/release.sh               # tags from the app version, e.g. v1.2.0
 ./scripts/release.sh v1.2.0        # or an explicit tag
 ```
 
@@ -83,7 +90,8 @@ running. Without them the DMG is self-signed (one-time Gatekeeper bypass needed)
 ## Settings
 
 - **General** — Copilot CLI path, model source, default model, system message,
-  clipboard history size, default choices, auto-popup, launch at login.
+  clipboard history size, default choices, auto-popup, launch at login, web
+  search engines, clipboard-window hotkey.
 - **Models (BYOK)** — manage bring-your-own models with Test Connection.
 - **Tasks** — custom tasks (icon, name, instruction) and global hotkeys.
 - **Advanced** — skills folder; MCP servers from `mcp.json` with per-server

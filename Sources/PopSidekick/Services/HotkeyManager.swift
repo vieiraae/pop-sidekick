@@ -29,12 +29,20 @@ final class HotkeyManager {
         }
     }
 
-    /// Re-registers all hotkeys from the given tasks, replacing any prior set.
-    func register(tasks: [TaskDef]) {
+    /// Reserved action id used for the "open clipboard history" global hotkey,
+    /// distinguishable from any task id (task ids are UUID strings).
+    static let clipboardHistoryActionID = "__clipboard_history__"
+
+    /// Re-registers all hotkeys from the given tasks plus the optional clipboard
+    /// history shortcut, replacing any prior set.
+    func register(tasks: [TaskDef], clipboardHotkey: Hotkey? = nil) {
         unregisterAll()
         for task in tasks {
             guard let hk = task.hotkey else { continue }
             register(hotkey: hk, taskID: task.id)
+        }
+        if let clipboardHotkey {
+            register(hotkey: clipboardHotkey, taskID: HotkeyManager.clipboardHistoryActionID)
         }
     }
 

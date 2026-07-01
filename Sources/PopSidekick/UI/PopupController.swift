@@ -12,6 +12,11 @@ final class PopupController: NSObject {
     /// clear its dedupe state (otherwise re-selecting the same text is ignored).
     var onHidden: (() -> Void)?
 
+    /// Called when the user dismisses the popup with Esc, passing the dismissed
+    /// selection so the monitor can suppress immediately reopening it while the
+    /// same text stays selected.
+    var onEscapeDismiss: ((String) -> Void)?
+
     private let panel = PopupPanel()
     private var hostingController: NSHostingController<PopupRootView>?
     private var viewModel: PopupViewModel?
@@ -19,6 +24,7 @@ final class PopupController: NSObject {
     private var modeObservation: AnyCancellable?
     private var outsideMonitor: Any?
     private var escMonitor: Any?
+    private var escGlobalMonitor: Any?
     private var anchor: NSPoint = .zero
     /// Selection rectangle in screen coordinates (top-left origin), when known,
     /// so the popup can flip above the *top* of the selection (not its bottom).
@@ -96,6 +102,45 @@ final class PopupController: NSObject {
             show(text: "", at: NSEvent.mouseLocation)
             viewModel?.expandToEdit()
         }
+    }
+
+    /// Opens a standalone clipboard-history browser at the cursor, triggered by
+    /// the global hotkey. Captures the frontmost app so paste targets it.
+    func showClipboardHistory() {
+        // If a popup is already up, just switch it to history mode in place.
+        if panel.isVisible, let vm = viewModel {
+            vm.sourceApp = NSWorkspace.shared.frontmostApplication
+            vm.configureForHistory()
+            return
+        }
+        anchor = NSEvent.mouseLocation
+        selectionBounds = nil
+        let vm = PopupViewModel()
+        vm.configureForHistory()
+        vm.sourceApp = NSWorkspace.shared.frontmostApplication
+        vm.onRequestClose = { [weak self] in self?.hide() }
+        viewModel = vm
+
+        let root = PopupRootView(vm: vm)
+        let controller = NSHostingController(rootView: root)
+        controller.sizingOptions = [.preferredContentSize]
+        hostingController = controller
+        panel.contentViewController = controller
+
+        sizeObservation = controller.observe(\.preferredContentSize, options: [.new]) { [weak self] ctrl, _ in
+            Task { @MainActor in self?.resizeAndReposition(to: ctrl.preferredContentSize) }
+        }
+        modeObservation = vm.$mode
+            .sink { [weak self] _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + Metrics.reflowDelay) {
+                    guard let self, let ctrl = self.hostingController else { return }
+                    self.resizeAndReposition(to: ctrl.preferredContentSize)
+                }
+            }
+
+        resizeAndReposition(to: controller.preferredContentSize)
+        panel.orderFrontRegardless()
+        installDismissMonitors()
     }
 
     /// Runs a task on the current selection, triggered by its global hotkey.
@@ -201,18 +246,41 @@ final class PopupController: NSObject {
                 self.hide()
             }
         }
+        // Local monitor: fires when our app happens to hold focus (e.g. the
+        // expanded editor's text field). Consumes Esc by returning nil.
         escMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
             if event.keyCode == 53 { // Escape
-                Diag.log("escMonitor: forceClose")
-                Task { @MainActor in self?.viewModel?.forceClose() }
+                Diag.log("escMonitor(local): forceClose")
+                Task { @MainActor in self?.dismissViaEscape() }
                 return nil
             }
             return event
+        }
+        // Global monitor: the panel is non-activating, so the source app keeps
+        // keyboard focus and the local monitor won't see Esc. This observes Esc
+        // system-wide to dismiss the popup while it's on screen.
+        escGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            if event.keyCode == 53 { // Escape
+                Task { @MainActor in
+                    guard let self, self.panel.isVisible else { return }
+                    Diag.log("escMonitor(global): forceClose")
+                    self.dismissViaEscape()
+                }
+            }
         }
     }
 
     private func removeDismissMonitors() {
         if let m = outsideMonitor { NSEvent.removeMonitor(m); outsideMonitor = nil }
         if let m = escMonitor { NSEvent.removeMonitor(m); escMonitor = nil }
+        if let m = escGlobalMonitor { NSEvent.removeMonitor(m); escGlobalMonitor = nil }
+    }
+
+    /// Dismisses the popup in response to Esc, suppressing an immediate reopen
+    /// of the still-selected text (the Esc keyUp would otherwise re-probe it).
+    private func dismissViaEscape() {
+        let dismissed = viewModel?.selectedText
+        viewModel?.forceClose()
+        if let dismissed, !dismissed.isEmpty { onEscapeDismiss?(dismissed) }
     }
 }

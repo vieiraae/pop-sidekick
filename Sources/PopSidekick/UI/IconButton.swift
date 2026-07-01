@@ -62,40 +62,104 @@ struct MenuIconLabel: View {
     }
 }
 
-/// A split paste button: clicking the icon pastes with source styling; the
-/// small chevron opens a menu offering Match Style and Plain Text.
-struct PasteMenu: View {
-    var systemName: String = "clipboard"
-    var help: String = "Paste"
-    var onPaste: (PasteStyle) -> Void
+/// A split search button: clicking the icon searches with the default engine;
+/// the chevron opens a menu listing all configured engines.
+struct SearchMenu: View {
+    var engines: [SearchEngine]
+    var defaultEngine: SearchEngine?
+    var onSearch: (SearchEngine) -> Void
 
     @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 0) {
-            IconButton(systemName: systemName, help: help) { onPaste(.source) }
-            Menu {
-                Button { onPaste(.source) } label: { Label("Paste", systemImage: "clipboard") }
-                Button { onPaste(.matchStyle) } label: { Label("Paste and Match Style", systemImage: "textformat") }
-                Button { onPaste(.plainText) } label: { Label("Paste as Plain Text", systemImage: "textformat.abc.dottedunderline") }
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-                    .frame(width: 14, height: 28)
-                    .foregroundStyle(.secondary)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(hovering ? Color.primary.opacity(0.10) : Color.clear)
-                    )
-                    .contentShape(Rectangle())
-                    .onHover { hovering = $0 }
+            IconButton(systemName: "magnifyingglass", help: searchHelp) {
+                if let engine = defaultEngine ?? engines.first { onSearch(engine) }
             }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Paste options")
-            .tooltip("Paste options")
+            if engines.count > 1 {
+                Menu {
+                    ForEach(engines) { engine in
+                        Button { onSearch(engine) } label: {
+                            Label(engine.name, systemImage: "magnifyingglass")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .frame(width: 14, height: 28)
+                        .foregroundStyle(.secondary)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(hovering ? Color.primary.opacity(0.10) : Color.clear)
+                        )
+                        .contentShape(Rectangle())
+                        .onHover { hovering = $0 }
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Search with…")
+                .tooltip("Search with…")
+            }
+        }
+    }
+
+    private var searchHelp: String {
+        if let name = (defaultEngine ?? engines.first)?.name { return "Search with \(name)" }
+        return "Search the web"
+    }
+}
+
+/// A split paste button: clicking the icon pastes with source styling; the
+/// small chevron opens a menu offering Match Style and Plain Text.
+/// The Paste split-button. Its dropdown adapts to what's on the clipboard:
+/// plain text/link/file paste with no dropdown; rich text exposes the style
+/// options; an image pastes the image and offers "Paste Extracted Text".
+struct PasteMenu: View {
+    var systemName: String = "clipboard"
+    var help: String = "Paste"
+    /// Kind of the content currently on the clipboard (nil → treat as plain).
+    var kind: ClipKind?
+    var onPaste: (PasteStyle) -> Void
+    var onExtractText: () -> Void = {}
+
+    @State private var hovering = false
+
+    private var showsDropdown: Bool { kind == .richText || kind == .image }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            IconButton(systemName: systemName, help: help) { onPaste(.source) }
+            if showsDropdown {
+                Menu {
+                    if kind == .image {
+                        Button { onPaste(.source) } label: { Label("Paste Image", systemImage: "photo") }
+                        Button { onExtractText() } label: { Label("Paste Extracted Text", systemImage: "text.viewfinder") }
+                    } else {
+                        Button { onPaste(.source) } label: { Label("Paste", systemImage: "clipboard") }
+                        Button { onPaste(.matchStyle) } label: { Label("Paste and Match Style", systemImage: "textformat") }
+                        Button { onPaste(.plainText) } label: { Label("Paste as Plain Text", systemImage: "textformat.abc.dottedunderline") }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .frame(width: 14, height: 28)
+                        .foregroundStyle(.secondary)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(hovering ? Color.primary.opacity(0.10) : Color.clear)
+                        )
+                        .contentShape(Rectangle())
+                        .onHover { hovering = $0 }
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Paste options")
+                .tooltip("Paste options")
+            }
         }
     }
 }

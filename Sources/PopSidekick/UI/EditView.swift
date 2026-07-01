@@ -30,6 +30,9 @@ struct EditView: View {
             Text("Pop Sidekick")
                 .font(.headline)
             Spacer()
+            SearchMenu(engines: vm.searchEngines, defaultEngine: vm.defaultSearchEngine) { engine in
+                vm.searchWeb(vm.editText, engine: engine)
+            }
             IconButton(systemName: vm.pinned ? "pin.fill" : "pin",
                        help: vm.pinned ? "Unpin" : "Pin — keep window on top",
                        prominent: vm.pinned) {
@@ -47,13 +50,18 @@ struct EditView: View {
 
     private var editor: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Line 1: editable text
-            TextEditor(text: $vm.editText)
-                .font(.system(size: 12))
-                .frame(height: 70)
-                .padding(6)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08)))
+            // Line 1: editable text, or an image preview when an image clip was
+            // sent to the editor (it's attached as base64 on Run).
+            if let data = vm.attachedImageData, let image = NSImage(data: data) {
+                imagePreview(image)
+            } else {
+                TextEditor(text: $vm.editText)
+                    .font(.system(size: 12))
+                    .frame(height: 70)
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08)))
+            }
 
             // Line 2: task / tone / format / length (compact icon menus)
             HStack(spacing: 0) {
@@ -83,10 +91,9 @@ struct EditView: View {
             }
 
             // Line 3: extra instructions
-            TextField("Additional instructions…",
-                      text: $vm.extraInstructions, axis: .vertical)
+            TextField("Additional instructions…", text: $vm.extraInstructions)
                 .textFieldStyle(.roundedBorder)
-                .lineLimit(1...3)
+                .onSubmit { if !vm.isProcessing { vm.runEdit() } }
 
             // Line 4: model / choices / run
             HStack(spacing: 8) {
@@ -133,6 +140,25 @@ struct EditView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func imagePreview(_ image: NSImage) -> some View {
+        ZStack(alignment: .topTrailing) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .frame(height: 120)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08)))
+            IconButton(systemName: "xmark.circle.fill", help: "Remove image") {
+                vm.attachedImageData = nil
+            }
+            .padding(2)
+        }
+        .help("This image is attached to the request when you Run.")
     }
 
     @ViewBuilder

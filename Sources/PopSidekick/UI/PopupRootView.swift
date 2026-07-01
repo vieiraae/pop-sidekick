@@ -27,7 +27,7 @@ struct PopupRootView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: vm.mode)
     }
 
-    private var cornerRadius: CGFloat { vm.mode == .edit ? Metrics.editCornerRadius : Metrics.compactCornerRadius }
+    private var cornerRadius: CGFloat { (vm.mode == .edit || vm.mode == .history) ? Metrics.editCornerRadius : Metrics.compactCornerRadius }
 
     @ViewBuilder
     private var content: some View {
@@ -38,6 +38,8 @@ struct PopupRootView: View {
             EditView(vm: vm)
         case .prompt:
             PromptView(vm: vm)
+        case .history:
+            ClipboardHistoryView(vm: vm)
         }
     }
 }

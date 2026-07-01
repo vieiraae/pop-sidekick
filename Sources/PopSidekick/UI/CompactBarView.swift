@@ -61,15 +61,23 @@ struct CompactBarView: View {
             }
             IconButton(systemName: "doc.on.doc", help: "Copy") { vm.doCopy() }
             if vm.isEditable {
-                PasteMenu(systemName: "clipboard", help: "Paste") { style in
-                    vm.pasteCurrentClipboard(style: style)
-                }
+                PasteMenu(systemName: "clipboard", help: "Paste",
+                          kind: vm.currentClipboardContent?.kind,
+                          onPaste: { style in vm.pasteCurrentClipboard(style: style) },
+                          onExtractText: { vm.extractTextFromCurrentClipboard() })
             }
 
             VBar()
 
-            historyMenu
-            bookmarksMenu
+            IconButton(systemName: "clock.arrow.circlepath", help: "Clipboard History") {
+                vm.openHistory()
+            }
+            IconButton(systemName: "bookmark", help: "Bookmarks") {
+                vm.openBookmarks()
+            }
+            SearchMenu(engines: vm.searchEngines, defaultEngine: vm.defaultSearchEngine) { engine in
+                vm.searchWeb(engine: engine)
+            }
 
             VBar()
 
@@ -90,151 +98,6 @@ struct CompactBarView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .fixedSize()
-    }
-
-    private var historyMenu: some View {
-        Menu {
-            if clipboard.history.isEmpty {
-                Text("No clipboard history").foregroundStyle(.secondary)
-            } else {
-                ForEach(clipboard.history) { item in
-                    Menu {
-                        if vm.isEditable {
-                            Button("Paste") { vm.paste(item.content, style: .source) }
-                            if item.isImage {
-                                Button("Paste Extracted Text") { vm.extractTextFromImage(item) }
-                            }
-                            if item.hasRichText {
-                                Button("Paste and Match Style") { vm.paste(item.content, style: .matchStyle) }
-                            }
-                            if !item.isImage {
-                                Button(item.isFile ? "Paste Path as Text" : "Paste as Plain Text") {
-                                    vm.paste(item.content, style: .plainText)
-                                }
-                            }
-                        } else {
-                            Button("Copy") { vm.copy(item.content, style: .source) }
-                        }
-                        Divider()
-                        Button(item.bookmarked ? "Bookmarked" : "Bookmark") {
-                            clipboard.bookmark(item)
-                        }.disabled(item.bookmarked)
-                        if item.isEditableText {
-                            Button("Edit…") { vm.beginEditingClip(item) }
-                        }
-                        Button("Delete", role: .destructive) { clipboard.delete(item) }
-                    } label: {
-                        clipItemLabel(item)
-                    } primaryAction: {
-                        if vm.isEditable {
-                            vm.paste(item.content, style: .source)
-                        } else {
-                            vm.copy(item.content, style: .source)
-                        }
-                    }
-                }
-                Divider()
-                Button("Clear History") { clipboard.clearHistory() }
-            }
-        } label: {
-            MenuIconLabel(systemName: "clock.arrow.circlepath", accessibilityLabel: "Clipboard History")
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Clipboard History")
-        .tooltip("Clipboard History")
-    }
-
-    private var bookmarksMenu: some View {
-        Menu {
-            if clipboard.bookmarks.isEmpty {
-                Text("No bookmarks").foregroundStyle(.secondary)
-            } else {
-                ForEach(clipboard.bookmarks) { item in
-                    Menu {
-                        if vm.isEditable {
-                            Button("Paste") { vm.paste(item.content, style: .source) }
-                            if item.isImage {
-                                Button("Paste Extracted Text") { vm.extractTextFromImage(item) }
-                            }
-                            if item.hasRichText {
-                                Button("Paste and Match Style") { vm.paste(item.content, style: .matchStyle) }
-                            }
-                            if !item.isImage {
-                                Button(item.isFile ? "Paste Path as Text" : "Paste as Plain Text") {
-                                    vm.paste(item.content, style: .plainText)
-                                }
-                            }
-                        } else {
-                            Button("Copy") { vm.copy(item.content, style: .source) }
-                        }
-                        Divider()
-                        Button("Unbookmark") { clipboard.unbookmark(item) }
-                        if item.isEditableText {
-                            Button("Edit…") { vm.beginEditingClip(item) }
-                        }
-                        Button("Delete", role: .destructive) { clipboard.delete(item) }
-                    } label: {
-                        clipItemLabel(item)
-                    } primaryAction: {
-                        if vm.isEditable {
-                            vm.paste(item.content, style: .source)
-                        } else {
-                            vm.copy(item.content, style: .source)
-                        }
-                    }
-                }
-            }
-        } label: {
-            MenuIconLabel(systemName: "bookmark", accessibilityLabel: "Bookmarks")
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Bookmarks")
-        .tooltip("Bookmarks")
-    }
-
-    /// Menu label for a clip item — a type-appropriate icon plus a preview.
-    @ViewBuilder
-    private func clipItemLabel(_ item: ClipItem) -> some View {
-        switch item.kind {
-        case .image:
-            Label {
-                Text("Image")
-            } icon: {
-                if let image = item.content.image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 16, height: 16)
-                } else {
-                    Image(systemName: "photo")
-                }
-            }
-        case .file:
-            Label {
-                Text(item.preview)
-            } icon: {
-                if let path = item.filePaths?.first {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: path))
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 16, height: 16)
-                } else {
-                    Image(systemName: "doc")
-                }
-            }
-        case .link:
-            Label(item.preview, systemImage: "link")
-        case .richText:
-            Label(item.preview, systemImage: "textformat")
-        case .text:
-            Label(item.preview, systemImage: "text.alignleft")
-        }
     }
 
     private var tasksMenu: some View {

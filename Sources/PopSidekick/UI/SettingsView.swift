@@ -74,6 +74,11 @@ private struct GeneralSettings: View {
             Section("Behavior") {
                 Toggle("Launch at login", isOn: $store.settings.launchAtLogin)
                 Toggle("Show popup automatically on selection", isOn: $store.settings.showPopupAutomatically)
+                HStack {
+                    Text("Clipboard history shortcut")
+                    Spacer()
+                    HotkeyRecorder(hotkey: $store.settings.clipboardHotkey)
+                }
                 Stepper("Clipboard history: \(store.settings.maxHistoryItems) items",
                         value: $store.settings.maxHistoryItems, in: 5...500, step: 5)
                 Stepper("Default result choices: \(store.settings.defaultChoices)",
@@ -86,6 +91,7 @@ private struct GeneralSettings: View {
                     .font(.system(size: 12))
                     .frame(height: 90)
             }
+            SearchEnginesSection(store: store)
         }
         .formStyle(.grouped)
         .padding()
@@ -109,6 +115,56 @@ private struct GeneralSettings: View {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             store.settings[keyPath: keyPath] = url.path
+        }
+    }
+}
+
+/// A Form section to manage configurable web search engines.
+private struct SearchEnginesSection: View {
+    @ObservedObject var store: SettingsStore
+
+    var body: some View {
+        Section("Web Search") {
+            Text("Use %s as the placeholder for the selected text. The default engine is used by the search button; the others appear in its dropdown.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach($store.settings.searchEngines) { $engine in
+                HStack(spacing: 8) {
+                    Button {
+                        store.settings.defaultSearchEngineID = engine.id
+                    } label: {
+                        Image(systemName: store.settings.defaultSearchEngine?.id == engine.id
+                              ? "largecircle.fill.circle" : "circle")
+                            .foregroundStyle(store.settings.defaultSearchEngine?.id == engine.id
+                                             ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Set as default")
+                    TextField("Name", text: $engine.name)
+                        .frame(width: 90)
+                    TextField("https://example.com/search?q=%s", text: $engine.urlTemplate)
+                        .textFieldStyle(.roundedBorder)
+                    Button(role: .destructive) {
+                        store.settings.searchEngines.removeAll { $0.id == engine.id }
+                    } label: { Image(systemName: "trash") }
+                    .buttonStyle(.plain)
+                    .disabled(store.settings.searchEngines.count <= 1)
+                }
+            }
+
+            HStack {
+                Button {
+                    store.settings.searchEngines.append(
+                        SearchEngine(name: "New Engine",
+                                     urlTemplate: "https://example.com/search?q=%s"))
+                } label: { Label("Add Engine", systemImage: "plus") }
+                Spacer()
+                Button("Restore Defaults") {
+                    store.settings.searchEngines = SearchEngine.defaults
+                    store.settings.defaultSearchEngineID = SearchEngine.defaults.first?.id
+                }
+            }
         }
     }
 }

@@ -41,21 +41,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popupController?.onHidden = { [weak self] in
             self?.selectionMonitor.reset()
         }
+        popupController?.onEscapeDismiss = { [weak self] text in
+            self?.selectionMonitor.suppressReshow(of: text)
+        }
 
         // Global task hotkeys: run the task on the current selection.
         hotkeyManager.onTrigger = { [weak self] taskID in
-            guard let self,
-                  let task = SettingsStore.shared.settings.tasks.first(where: { $0.id == taskID })
+            guard let self else { return }
+            if taskID == HotkeyManager.clipboardHistoryActionID {
+                self.popupController?.showClipboardHistory()
+                return
+            }
+            guard let task = SettingsStore.shared.settings.tasks.first(where: { $0.id == taskID })
             else { return }
             self.popupController?.runTaskOnSelection(task)
         }
-        hotkeyManager.register(tasks: SettingsStore.shared.settings.tasks)
+        hotkeyManager.register(tasks: SettingsStore.shared.settings.tasks,
+                               clipboardHotkey: SettingsStore.shared.settings.clipboardHotkey)
         // Re-register whenever the task list / shortcuts change.
         settingsObservation = SettingsStore.shared.$settings
-            .map(\.tasks)
+            .map { HotkeyRegistrationInput(tasks: $0.tasks, clipboardHotkey: $0.clipboardHotkey) }
             .removeDuplicates()
-            .sink { [weak self] tasks in
-                self?.hotkeyManager.register(tasks: tasks)
+            .sink { [weak self] input in
+                self?.hotkeyManager.register(tasks: input.tasks, clipboardHotkey: input.clipboardHotkey)
             }
 
         if AccessibilityService.isTrusted {
@@ -156,4 +164,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() {
         NSApp.terminate(nil)
     }
+}
+
+/// Equatable bundle of the inputs that drive global hotkey registration, so the
+/// settings observer only re-registers when the relevant fields change.
+private struct HotkeyRegistrationInput: Equatable {
+    var tasks: [TaskDef]
+    var clipboardHotkey: Hotkey?
 }

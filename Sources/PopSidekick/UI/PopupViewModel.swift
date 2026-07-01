@@ -12,6 +12,13 @@ enum PopupMode {
     case compact
     case edit
     case prompt
+    case history
+}
+
+/// Which tab the clipboard window shows.
+enum ClipboardTab {
+    case history
+    case bookmarks
 }
 
 /// Drives a single popup instance: holds the selected text, edit configuration,
@@ -19,6 +26,7 @@ enum PopupMode {
 @MainActor
 final class PopupViewModel: ObservableObject {
     @Published var mode: PopupMode = .compact
+    @Published var clipboardTab: ClipboardTab = .history
     @Published var pinned = false
     @Published var isProcessing = false
     @Published var statusMessage: String?
@@ -44,6 +52,10 @@ final class PopupViewModel: ObservableObject {
     // Inline clip editing (history/bookmark items)
     @Published var editingClip: ClipItem?
     @Published var editingClipText: String = ""
+
+    /// When an image clip is sent to the editor, its PNG data is held here so a
+    /// preview shows in the input area and the image is attached (base64) on Run.
+    @Published var attachedImageData: Data?
 
     /// Called when the popup wants to close itself.
     var onRequestClose: (() -> Void)?
@@ -108,6 +120,7 @@ final class PopupViewModel: ObservableObject {
         selectedText = text
         editText = text
         self.isEditable = isEditable
+        attachedImageData = nil
         detectedFolder = Self.folderURL(in: text)
         detectedURL = Self.firstURL(in: text)
         let settings = SettingsStore.shared.settings
@@ -137,6 +150,10 @@ final class PopupViewModel: ObservableObject {
     func doCut() { performClipboard { AccessibilityService.cut() } }
 
     func doCopy() { performClipboard { AccessibilityService.copy() } }
+
+    /// The richest representation currently on the system clipboard, used to
+    /// tailor the Paste button's options to what will actually be pasted.
+    var currentClipboardContent: RichContent? { RichContent.read(from: .general) }
 
     /// Pastes whatever is currently on the system clipboard, honoring the style.
     func pasteCurrentClipboard(style: PasteStyle = .source) {
@@ -204,6 +221,24 @@ final class PopupViewModel: ObservableObject {
         if !pinned { onRequestClose?() }
     }
 
+    /// Configurable search engines and the default one (used by the search
+    /// button; the rest are offered in its dropdown).
+    var searchEngines: [SearchEngine] { SettingsStore.shared.settings.searchEngines }
+    var defaultSearchEngine: SearchEngine? { SettingsStore.shared.settings.defaultSearchEngine }
+
+    /// Searches the web for the given text with the chosen engine (or the
+    /// configured default), opening the result in the default browser. Closes
+    /// afterward unless pinned. Falls back to the current selection when no
+    /// text is given.
+    func searchWeb(_ text: String? = nil, engine: SearchEngine? = nil) {
+        let query = (text ?? selectedText).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        let chosen = engine ?? defaultSearchEngine
+        guard let url = chosen?.url(for: query) else { return }
+        NSWorkspace.shared.open(url)
+        if !pinned { onRequestClose?() }
+    }
+
     // MARK: - AI actions
 
     func run(task: TaskDef) {
@@ -230,6 +265,16 @@ final class PopupViewModel: ObservableObject {
     /// attachment to a vision-capable model.
     func extractTextFromImage(_ item: ClipItem) {
         guard let png = item.imageData else { return }
+        extractText(fromImagePNG: png)
+    }
+
+    /// Extracts text from the image currently on the system clipboard.
+    func extractTextFromCurrentClipboard() {
+        guard let png = currentClipboardContent?.imageData else { return }
+        extractText(fromImagePNG: png)
+    }
+
+    private func extractText(fromImagePNG png: Data) {
         let attachment: [String: Any] = [
             "type": "blob",
             "data": png.base64EncodedString(),
@@ -247,8 +292,20 @@ final class PopupViewModel: ObservableObject {
 
     func runEdit() {
         let task = taskID.flatMap { id in allTasks.first(where: { $0.id == id }) }
-        let prompt = buildPrompt(instruction: task?.instruction, text: editText, includeStyling: true)
-        startRun(prompt: prompt, statusLabel: task.map { "\($0.name)…" } ?? "Working…")
+        let hasImage = attachedImageData != nil
+        let prompt = buildPrompt(instruction: task?.instruction, text: editText,
+                                 includeStyling: true, hasImage: hasImage)
+        var attachments: [[String: Any]]? = nil
+        if let png = attachedImageData {
+            attachments = [[
+                "type": "blob",
+                "data": png.base64EncodedString(),
+                "mimeType": "image/png",
+                "displayName": "clipboard-image.png",
+            ]]
+        }
+        startRun(prompt: prompt, statusLabel: task.map { "\($0.name)…" } ?? "Working…",
+                 attachments: attachments)
     }
 
     /// Runs the free-form prompt. For editable selections it mirrors quick-task
@@ -271,7 +328,8 @@ final class PopupViewModel: ObservableObject {
         }
     }
 
-    private func buildPrompt(instruction: String?, text: String, includeStyling: Bool) -> String {
+    private func buildPrompt(instruction: String?, text: String, includeStyling: Bool,
+                             hasImage: Bool = false) -> String {
         var parts: [String] = []
         if let instruction, !instruction.isEmpty {
             parts.append(instruction)
@@ -292,7 +350,11 @@ final class PopupViewModel: ObservableObject {
             }
         }
         parts.append("Reply with only the resulting text.")
-        parts.append("\nText:\n\(text)")
+        if !text.isEmpty {
+            parts.append("\nText:\n\(text)")
+        } else if hasImage {
+            parts.append("\nThe content to work with is in the attached image.")
+        }
         return parts.joined(separator: "\n")
     }
 
@@ -369,10 +431,43 @@ final class PopupViewModel: ObservableObject {
 
     // MARK: - Clip editing
 
+    /// Mode to return to after finishing an inline clip edit (so editing an item
+    /// from the history popup returns to the history list, not the compact bar).
+    private var clipEditReturnMode: PopupMode = .compact
+
     func beginEditingClip(_ item: ClipItem) {
+        clipEditReturnMode = (mode == .history) ? .history : .compact
         editingClip = item
         editingClipText = item.text
         mode = .edit
+    }
+
+    /// Opens the AI editor populated with a clipboard item's content. Rich text
+    /// is reduced to plain text; an image is shown as a preview and attached as
+    /// base64 when the run starts.
+    func editClipWithAI(_ item: ClipItem) {
+        editingClip = nil
+        results = []
+        statusMessage = nil
+        if item.isImage {
+            attachedImageData = item.imageData
+            editText = ""
+            selectedText = ""
+        } else {
+            attachedImageData = nil
+            editText = item.text
+            selectedText = item.text
+        }
+        // Mirror the popup Edit window's current values.
+        let settings = SettingsStore.shared.settings
+        model = settings.model
+        choices = max(1, settings.defaultChoices)
+        taskID = settings.editTaskID
+        tone = settings.editTone
+        format = settings.editFormat
+        length = settings.editLength
+        mode = .edit
+        if copilot.models.count <= 1 { copilot.refreshModels() }
     }
 
     func saveEditingClip() {
@@ -380,13 +475,44 @@ final class PopupViewModel: ObservableObject {
             ClipboardStore.shared.edit(item, newText: editingClipText)
         }
         editingClip = nil
+        if clipEditReturnMode == .history { mode = .history }
     }
 
     func cancelEditingClip() {
         editingClip = nil
+        if clipEditReturnMode == .history { mode = .history }
     }
 
     // MARK: - Mode / window
+
+    /// Switches the current popup into the clipboard-history browser (used by
+    /// the compact bar's history button). Preserves the source app and
+    /// editability so paste still targets the original selection.
+    func openHistory() {
+        results = []
+        statusMessage = nil
+        clipboardTab = .history
+        mode = .history
+    }
+
+    /// Opens the clipboard window focused on the Bookmarks tab.
+    func openBookmarks() {
+        results = []
+        statusMessage = nil
+        clipboardTab = .bookmarks
+        mode = .history
+    }
+
+    /// Configures the popup as a standalone clipboard-history browser, launched
+    /// from the global hotkey. Paste targets the previously focused app.
+    func configureForHistory() {
+        selectedText = ""
+        editText = ""
+        isEditable = true
+        results = []
+        statusMessage = nil
+        mode = .history
+    }
 
     func expandToEdit() {
         mode = .edit
