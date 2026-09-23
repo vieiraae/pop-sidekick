@@ -8,7 +8,9 @@
 // Requests (Swift -> bridge):
 //   { cmd: "listModels", id }
 //   { cmd: "run", id, prompt, model?, systemMessage?, choices?,
-//                 mcpServers?, skillDirectories?, enableConfigDiscovery?,
+//                 mcpServers?, disabledMcpServers?, skillDirectories?, enableConfigDiscovery?,
+//                 reasoningEffort?, autoTier?,
+//                 workingDirectory?,
 //                 autoApproveTools?, timeoutMs?, attachments?, provider? }
 //   { cmd: "ping", id, model?, provider?, prompt?, timeoutMs? }
 //   { cmd: "cancel", id }
@@ -16,7 +18,7 @@
 //
 // Events (bridge -> Swift):
 //   { type: "ready" }
-//   { type: "models", id, models: [{ id, name }] }
+//   { type: "models", id, models: [{ id, name, efforts?, defaultEffort? }] }
 //   { type: "pong",   id }
 //   { type: "delta",  id, choice, text }
 //   { type: "result", id, choice, text }
@@ -27,10 +29,26 @@
 import readline from "node:readline";
 import { CopilotClient, RuntimeConnection, approveAll } from "@github/copilot-sdk";
 
-const copilotPath = process.env.POPSIDEKICK_COPILOT_PATH || "/opt/homebrew/bin/copilot";
+let copilotPath = process.env.POPSIDEKICK_COPILOT_PATH || "/opt/homebrew/bin/copilot";
+
+// If the reader (the app) goes away, writes to stdout raise EPIPE. Without a
+// handler Node throws an unhandled 'error' event and the whole bridge crashes.
+// Handle it gracefully instead.
+let stdoutBroken = false;
+process.stdout.on("error", (err) => {
+  if (err && (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED")) {
+    stdoutBroken = true;
+    process.exit(0);
+  }
+});
 
 function emit(obj) {
-  process.stdout.write(JSON.stringify(obj) + "\n");
+  if (stdoutBroken) return;
+  try {
+    process.stdout.write(JSON.stringify(obj) + "\n");
+  } catch {
+    // Swallow write failures; the stdout 'error' handler deals with EPIPE.
+  }
 }
 function log(message) {
   emit({ type: "log", message: String(message) });
@@ -45,6 +63,10 @@ async function getClient() {
   client = new CopilotClient({
     connection: RuntimeConnection.forStdio({ path: copilotPath }),
     logLevel: "error",
+    clientInfo: {
+      applicationName: "Pop Sidekick",
+      ...(process.env.POPSIDEKICK_VERSION ? { applicationVersion: process.env.POPSIDEKICK_VERSION } : {}),
+    },
   });
   await client.start();
   return client;
@@ -57,7 +79,12 @@ async function handleListModels(req) {
     emit({
       type: "models",
       id: req.id,
-      models: models.map((m) => ({ id: m.id, name: m.name })),
+      models: models.map((m) => ({
+        id: m.id,
+        name: m.name,
+        efforts: m.capabilities?.supports?.reasoningEffort ? (m.supportedReasoningEfforts ?? []) : [],
+        defaultEffort: m.defaultReasoningEffort,
+      })),
     });
   } catch (err) {
     emit({ type: "error", id: req.id, message: errMsg(err) });
@@ -78,16 +105,28 @@ function buildSessionConfig(req) {
     onPermissionRequest: autoApprove ? approveAll : denyAll,
   };
   if (req.model && req.model !== "auto") config.model = req.model;
+  if (req.reasoningEffort && config.model) config.reasoningEffort = req.reasoningEffort;
+  // Auto routing tier only applies to the "auto" model.
+  if (req.autoTier && !config.model && !req.provider) {
+    config.model = "auto";
+    config.autoTier = req.autoTier;
+  }
   if (req.systemMessage && req.systemMessage.trim().length > 0) {
     config.systemMessage = { mode: "append", content: req.systemMessage };
   }
   if (req.mcpServers && Object.keys(req.mcpServers).length > 0) {
     config.mcpServers = req.mcpServers;
   }
+  if (Array.isArray(req.disabledMcpServers) && req.disabledMcpServers.length > 0) {
+    config.disabledMcpServers = req.disabledMcpServers;
+  }
   if (Array.isArray(req.skillDirectories) && req.skillDirectories.length > 0) {
     config.skillDirectories = req.skillDirectories;
   }
   if (req.enableConfigDiscovery) config.enableConfigDiscovery = true;
+  if (typeof req.workingDirectory === "string" && req.workingDirectory.trim().length > 0) {
+    config.workingDirectory = req.workingDirectory;
+  }
   // BYOK: pass the user-supplied provider config straight through to the SDK.
   if (req.provider && req.provider.baseUrl) config.provider = req.provider;
   return config;
@@ -189,6 +228,11 @@ async function handlePing(req) {
   } finally {
     clearTimeout(timer);
     if (session) { try { await session.disconnect(); } catch {} }
+    // After a timeout the work keeps going; release its session when it lands.
+    work.then(
+      () => { if (session) session.disconnect().catch(() => {}); },
+      () => { if (session) session.disconnect().catch(() => {}); },
+    );
   }
 }
 

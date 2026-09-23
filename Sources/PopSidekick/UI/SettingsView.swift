@@ -5,15 +5,22 @@ import AppKit
 struct SettingsView: View {
     @ObservedObject var store = SettingsStore.shared
     @ObservedObject var copilot = CopilotService.shared
+    @ObservedObject private var selection = SettingsSelection.shared
 
     var body: some View {
-        TabView {
+        TabView(selection: $selection.tab) {
             GeneralSettings(store: store, copilot: copilot)
                 .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(SettingsTab.general)
             TasksSettings(store: store)
                 .tabItem { Label("Tasks", systemImage: "wand.and.stars") }
-            AdvancedSettings(store: store)
+                .tag(SettingsTab.tasks)
+            FocusTraceSettings(store: store)
+                .tabItem { Label("FocusTrace", systemImage: "scribble.variable") }
+                .tag(SettingsTab.focusTrace)
+            AdvancedSettings(store: store, copilot: copilot)
                 .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }
+                .tag(SettingsTab.advanced)
         }
         .frame(width: Metrics.settingsWidth, height: Metrics.settingsHeight)
     }
@@ -59,9 +66,22 @@ private struct GeneralSettings: View {
                 }
             }
             Section("Models") {
-                Picker("Default model", selection: $store.settings.model) {
+                Picker("Default model (tasks and edit text)", selection: $store.settings.model) {
                     ForEach(copilot.availableModels) { m in Text(m.name).tag(m.id) }
                 }
+                Picker("Reasoning effort", selection: $store.settings.reasoningEffort) {
+                    ForEach([""] + ReasoningLevel.all, id: \.self) { e in
+                        Text(ReasoningLevel.label(e)).tag(e)
+                    }
+                }
+                Picker("Auto routing", selection: $store.settings.autoTier) {
+                    ForEach([""] + AutoTierOption.all, id: \.self) { t in
+                        Label(AutoTierOption.label(t), systemImage: AutoTierOption.icon(t)).tag(t)
+                    }
+                }
+                Text("Reasoning effort applies to models that support it (the closest supported level is used). Auto routing steers the Auto model toward speed or quality.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Button("Refresh models") { copilot.refreshModels() }
                     .controlSize(.small)
 
@@ -74,6 +94,8 @@ private struct GeneralSettings: View {
             Section("Behavior") {
                 Toggle("Launch at login", isOn: $store.settings.launchAtLogin)
                 Toggle("Show popup automatically on selection", isOn: $store.settings.showPopupAutomatically)
+                Toggle("Review AI changes before replacing text", isOn: $store.settings.reviewChangesBeforeReplace)
+                    .help("Quick actions like Proofread show a word-level diff you can accept or cherry-pick instead of replacing the selection right away.")
                 HStack {
                     Text("Clipboard history shortcut")
                     Spacer()
@@ -86,10 +108,11 @@ private struct GeneralSettings: View {
                 Stepper("AI run timeout: \(store.settings.runTimeoutSeconds)s",
                         value: $store.settings.runTimeoutSeconds, in: 15...600, step: 15)
             }
-            Section("System message") {
-                TextEditor(text: $store.settings.systemMessage)
-                    .font(.system(size: 12))
-                    .frame(height: 90)
+            Section("Security") {
+                Toggle("Automatically approve tool requests", isOn: $store.settings.autoApproveTools)
+                Text("When on, Copilot may run tools, MCP servers, and skills without asking. Because prompts include the text you select (which can come from untrusted pages), leaving this off is safer. Turn off to reject all tool use (AI tasks still work for plain text transforms).")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             SearchEnginesSection(store: store)
         }
@@ -356,9 +379,22 @@ private struct TasksSettings: View {
     @State private var selection: TaskDef.ID?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Tasks")
-                .font(.headline)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("System message (tasks and edit text)")
+                    .font(.headline)
+                Text("Sent to Copilot at the start of every task and edit. Use it to set the overall behavior and tone.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextEditor(text: $store.settings.systemMessage)
+                    .font(.system(size: 12))
+                    .frame(height: 80)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2)))
+
+                Divider().padding(.vertical, 4)
+
+                Text("Tasks")
+                    .font(.headline)
             Text("Tasks run on the selected text. Toggle the popup column to show a task as a button in the popup, and assign an optional shortcut to run it on the current selection from anywhere.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -430,9 +466,10 @@ private struct TasksSettings: View {
                     store.settings.tasks = TaskDef.builtins
                     selection = nil
                 }
+                }
             }
+            .padding()
         }
-        .padding()
     }
 }
 
@@ -504,14 +541,189 @@ private struct HotkeyRecorder: View {
     }
 }
 
-private struct AdvancedSettings: View {
+private struct FocusTraceSettings: View {
     @ObservedObject var store: SettingsStore
+    @ObservedObject private var trace = FocusTrace.shared
+
+    private var enabled: Binding<Bool> {
+        Binding(get: { trace.isEnabled }, set: { trace.setEnabled($0) })
+    }
+
+    private var color: Binding<Color> {
+        Binding(
+            get: { Color(nsColor: NSColor(hex: store.settings.focusTraceColorHex) ?? .systemPink) },
+            set: { store.settings.focusTraceColorHex = NSColor($0).hexString }
+        )
+    }
+
+    private var cursorColor: Binding<Color> {
+        Binding(
+            get: { Color(nsColor: NSColor(hex: store.settings.focusTraceCursorColorHex) ?? .systemPink) },
+            set: { store.settings.focusTraceCursorColorHex = NSColor($0).hexString }
+        )
+    }
 
     var body: some View {
         Form {
-            Section("Security") {
-                Toggle("Automatically approve tool requests", isOn: $store.settings.autoApproveTools)
-                Text("When on, Copilot may run tools, MCP servers, and skills without asking. Because prompts include the text you select (which can come from untrusted pages), leaving this off is safer. Turn off to reject all tool use (AI tasks still work for plain text transforms).")
+            Section {
+                Toggle("Enable FocusTrace", isOn: enabled)
+                LabeledContent("Toggle shortcut") {
+                    HotkeyRecorder(hotkey: $store.settings.focusTraceHotkey)
+                }
+                Text("Makes the cursor prominent while presenting, and dragging traces attention with a colorful line that fades away.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Section("Cursor") {
+                LabeledContent("Cursor size") {
+                    HStack {
+                        Slider(value: $store.settings.focusTraceCursorScale, in: 1...5, step: 0.25)
+                        Text(String(format: "%.2g×", store.settings.focusTraceCursorScale))
+                            .monospacedDigit().foregroundStyle(.secondary).frame(width: 36, alignment: .trailing)
+                    }
+                }
+                Picker("Shape", selection: $store.settings.focusTraceCursorShape) {
+                    ForEach(FocusTraceCursorShape.allCases) { shape in
+                        Label(shape.label, systemImage: shape.symbol).tag(shape)
+                    }
+                }
+                ColorPicker("Cursor color", selection: cursorColor, supportsOpacity: false)
+                    .disabled(store.settings.focusTraceCursorShape == .system)
+                Toggle("Glass halo around cursor", isOn: $store.settings.focusTraceShowHalo)
+            }
+            Section("Trace") {
+                Picker("When dragging", selection: $store.settings.focusTraceDrawMode) {
+                    ForEach(FocusTraceDrawMode.allCases) { m in Text(m.label).tag(m) }
+                }
+                Text(store.settings.focusTraceDrawMode.detail + (store.settings.focusTraceDrawMode == .passThrough ? "" : " Press Esc to turn FocusTrace off."))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Multicolor", isOn: $store.settings.focusTraceMulticolor)
+                ColorPicker("Color", selection: color, supportsOpacity: false)
+                    .disabled(store.settings.focusTraceMulticolor)
+                LabeledContent("Line width") {
+                    HStack {
+                        Slider(value: $store.settings.focusTraceLineWidth, in: 3...28, step: 1)
+                        Text("\(Int(store.settings.focusTraceLineWidth)) pt")
+                            .monospacedDigit().foregroundStyle(.secondary).frame(width: 36, alignment: .trailing)
+                    }
+                }
+                LabeledContent("Fades after") {
+                    HStack {
+                        Slider(value: $store.settings.focusTraceFadeSeconds, in: 0.5...5, step: 0.1)
+                        Text(String(format: "%.1f s", store.settings.focusTraceFadeSeconds))
+                            .monospacedDigit().foregroundStyle(.secondary).frame(width: 36, alignment: .trailing)
+                    }
+                }
+                .disabled(store.settings.focusTracePersistentInk)
+                Toggle("Persistent ink", isOn: $store.settings.focusTracePersistentInk)
+                Text((store.settings.focusTracePersistentInk ? "Strokes stay until removed." : "Hold ⌥ while dragging to make a single stroke stay.")
+                     + " ⌫, ⌃Z or ⌘Z undoes the last one, ⌘⌫ clears all. These keys are only taken over while ink is on screen.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Smart shapes", isOn: $store.settings.focusTraceSnapShapes)
+                Text("⇧-drag draws an arrow and ⇧⌥-drag a box. Circle or box something to pin it, then ✨ asks Copilot to explain it.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Click ripples", isOn: $store.settings.focusTraceRipples)
+                LabeledContent("Ripple size") {
+                    HStack {
+                        Slider(value: $store.settings.focusTraceRippleSize, in: 6...150, step: 2)
+                        Text("\(Int(store.settings.focusTraceRippleSize)) pt")
+                            .monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+                    }
+                }
+                .disabled(!store.settings.focusTraceRipples)
+            }
+            Section("Spotlight") {
+                Toggle("Dim everything except around the cursor", isOn: $store.settings.focusTraceSpotlight)
+                LabeledContent("Radius") {
+                    HStack {
+                        Slider(value: $store.settings.focusTraceSpotlightRadius, in: 60...400, step: 10)
+                        Text("\(Int(store.settings.focusTraceSpotlightRadius)) pt")
+                            .monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+                    }
+                }
+                .disabled(!store.settings.focusTraceSpotlight)
+                LabeledContent("Dim") {
+                    HStack {
+                        Slider(value: $store.settings.focusTraceSpotlightDim, in: 0.1...0.95, step: 0.05)
+                        Text("\(Int((store.settings.focusTraceSpotlightDim * 100).rounded()))%")
+                            .monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+                    }
+                }
+                .disabled(!store.settings.focusTraceSpotlight)
+            }
+            Section("Magnifier") {
+                Toggle("Pinch to zoom where the cursor is", isOn: $store.settings.focusTraceMagnifier)
+                LabeledContent("Lens size") {
+                    HStack {
+                        Slider(value: $store.settings.focusTraceMagnifierSize, in: 140...480, step: 10)
+                        Text("\(Int(store.settings.focusTraceMagnifierSize)) pt")
+                            .monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+                    }
+                }
+                .disabled(!store.settings.focusTraceMagnifier)
+                Text("Spread two fingers on the trackpad to zoom in, pinch to zoom out. Esc resets.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Presenting") {
+                LabeledContent("Blank screen (black)") {
+                    HotkeyRecorder(hotkey: $store.settings.focusTraceBlackHotkey)
+                }
+                LabeledContent("Blank screen (white)") {
+                    HotkeyRecorder(hotkey: $store.settings.focusTraceWhiteHotkey)
+                }
+                Picker("Blank", selection: $store.settings.focusTraceBlankTarget) {
+                    Text("All screens").tag("all")
+                    Text("Screen with the pointer").tag("pointer")
+                    Divider()
+                    ForEach(blankScreenNames, id: \.self) { name in Text(name).tag(name) }
+                }
+                Text("Press again or Esc to return. You can keep drawing on the blank screen.")
+                    .font(.caption).foregroundStyle(.secondary)
+                LabeledContent("Screen Recording") {
+                    if screenRecording {
+                        Label("Granted", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    } else {
+                        Button("Grant…") {
+                            if !ScreenCapture.requestPermission() { ScreenCapture.openPrivacySettings() }
+                            screenRecording = ScreenCapture.hasPermission
+                        }
+                    }
+                }
+                Text("Needed for the magnifier and for explaining circled regions.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+        .onAppear { screenRecording = ScreenCapture.hasPermission }
+    }
+
+    @State private var screenRecording = false
+
+    /// Connected displays, plus the saved one if it's currently unplugged.
+    private var blankScreenNames: [String] {
+        var names = NSScreen.screens.map(\.localizedName)
+        let saved = store.settings.focusTraceBlankTarget
+        if saved != "all", saved != "pointer", !names.contains(saved) { names.append(saved) }
+        return names
+    }
+}
+
+private struct AdvancedSettings: View {
+    @ObservedObject var store: SettingsStore
+    @ObservedObject var copilot: CopilotService
+
+    var body: some View {
+        Form {
+            Section("Workspace") {
+                HStack {
+                    TextField("Working folder path", text: $store.settings.workingFolderPath)
+                    Button("Browse…") { pickFolder(into: \.workingFolderPath) }
+                }
+                Text("Anchors Copilot in your files")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -553,7 +765,9 @@ private struct AdvancedSettings: View {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
-        let servers = (json["mcpServers"] as? [String: Any]) ?? json
+        let servers = (json["mcpServers"] as? [String: Any])
+            ?? (json["servers"] as? [String: Any])
+            ?? json
         let names = servers.keys.sorted()
         let existing = Dictionary(uniqueKeysWithValues: store.settings.mcpServerToggles.map { ($0.name, $0.enabled) })
         store.settings.mcpServerToggles = names.map {

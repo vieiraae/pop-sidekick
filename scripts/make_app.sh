@@ -10,6 +10,12 @@ BUNDLE="$ROOT/dist/${APP_NAME}.app"
 
 echo "==> Building Swift binary ($CONFIG)"
 cd "$ROOT"
+# The Command Line Tools can lack the SwiftUI macro plugins (@State etc.);
+# prefer the full Xcode toolchain when it's installed.
+if [[ -z "${DEVELOPER_DIR:-}" && "$(xcode-select -p 2>/dev/null)" == /Library/Developer/CommandLineTools* \
+      && -d /Applications/Xcode.app/Contents/Developer ]]; then
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
 swift build -c "$CONFIG"
 BIN="$(swift build -c "$CONFIG" --show-bin-path)/PopSidekick"
 
@@ -25,6 +31,7 @@ mkdir -p "$BUNDLE/Contents/Resources"
 
 cp "$BIN" "$BUNDLE/Contents/MacOS/PopSidekick"
 cp "$ROOT/Resources/Info.plist" "$BUNDLE/Contents/Info.plist"
+cp "$ROOT/Resources/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
 
 echo "==> Copying Copilot SDK bridge"
 mkdir -p "$BUNDLE/Contents/Resources/bridge"
@@ -40,6 +47,10 @@ rm -rf "$BUNDLE/Contents/Resources/bridge/node_modules/@github/copilot"
 rm -rf "$BUNDLE"/Contents/Resources/bridge/node_modules/@github/copilot-darwin-*
 rm -rf "$BUNDLE"/Contents/Resources/bridge/node_modules/@github/copilot-linux-*
 rm -rf "$BUNDLE"/Contents/Resources/bridge/node_modules/@github/copilot-win32-*
+# SDK >= 1.0.14 ships its runtime as @github/copilot-sdk-<platform> (~90MB).
+rm -rf "$BUNDLE"/Contents/Resources/bridge/node_modules/@github/copilot-sdk-darwin-*
+rm -rf "$BUNDLE"/Contents/Resources/bridge/node_modules/@github/copilot-sdk-linux*
+rm -rf "$BUNDLE"/Contents/Resources/bridge/node_modules/@github/copilot-sdk-win32-*
 
 # Drop dangling symlinks (e.g. node_modules/.bin/copilot) left by pruning, so the
 # code signature seals cleanly and --deep --strict verification passes.

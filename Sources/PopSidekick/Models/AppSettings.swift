@@ -38,6 +38,58 @@ struct SearchEngine: Codable, Identifiable, Hashable {
 }
 
 /// Where models come from: GitHub Copilot (default) or a user-supplied provider.
+/// How a mouse drag interacts with FocusTrace drawing.
+/// How FocusTrace draws the magnified cursor.
+enum FocusTraceCursorShape: String, Codable, CaseIterable, Identifiable {
+    /// The macOS arrow image, magnified (color doesn't apply).
+    case system
+    case arrow, hand, dot, ring, crosshair
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .system: return "System arrow"
+        case .arrow: return "Arrow"
+        case .hand: return "Pointing hand"
+        case .dot: return "Dot"
+        case .ring: return "Ring"
+        case .crosshair: return "Crosshair"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .system, .arrow: return "cursorarrow"
+        case .hand: return "hand.point.up.left.fill"
+        case .dot: return "circle.fill"
+        case .ring: return "circle"
+        case .crosshair: return "plus"
+        }
+    }
+}
+
+enum FocusTraceDrawMode: String, Codable, CaseIterable, Identifiable {
+    /// Drags draw and still reach the app underneath.
+    case passThrough
+    /// Drags only draw; apps underneath don't receive clicks or drags.
+    case capture
+    /// Hold ⌥ while dragging to draw; other drags are unaffected.
+    case modifier
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .passThrough: return "Pass-through"
+        case .capture: return "Capture"
+        case .modifier: return "Hold ⌥ to draw"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .passThrough: return "Dragging draws a trace and still reaches the app underneath."
+        case .capture: return "Dragging only draws. Apps underneath don't receive clicks or drags while FocusTrace is on."
+        case .modifier: return "Hold ⌥ Option and drag to draw. Normal clicks and drags work as usual."
+        }
+    }
+}
+
 enum ModelSource: String, Codable, CaseIterable, Identifiable {
     case copilot
     case byok
@@ -166,6 +218,10 @@ struct BYOKModel: Codable, Identifiable, Hashable {
 struct AppSettings: Codable {
     var copilotPath: String = "/opt/homebrew/bin/copilot"
     var model: String = "auto"
+    /// Default reasoning effort ("" = the model's own default).
+    var reasoningEffort: String = ""
+    /// Auto model routing tier used when the model is "auto" ("" = runtime default).
+    var autoTier: String = ""
 
     // Whether the BYOK section is expanded/in use (also used to remember intent).
     var modelSource: ModelSource = .copilot
@@ -185,11 +241,50 @@ struct AppSettings: Codable {
     var tasks: [TaskDef] = TaskDef.builtins
 
     // Advanced
+    var workingFolderPath: String = ""
     var useSkillsFolder: Bool = false
     var skillsFolderPath: String = ""
     var useMCP: Bool = false
     var mcpConfigPath: String = "~/.copilot/mcp-config.json"
     var mcpServerToggles: [MCPServerToggle] = []
+
+    // FocusTrace
+    var focusTraceHotkey: Hotkey? = nil
+    /// Cursor magnification (1 = normal size).
+    var focusTraceCursorScale: Double = 2.5
+    var focusTraceShowHalo: Bool = true
+    var focusTraceColorHex: String = "#FF2D95"
+    /// Flow the trace through a spectrum of colors instead of a single color.
+    var focusTraceMulticolor: Bool = true
+    var focusTraceLineWidth: Double = 10
+    /// Seconds before a traced point fades out completely.
+    var focusTraceFadeSeconds: Double = 1.6
+    var focusTraceDrawMode: FocusTraceDrawMode = .passThrough
+    var focusTraceCursorShape: FocusTraceCursorShape = .system
+    var focusTraceCursorColorHex: String = "#FF2D95"
+    /// Rough loops snap to circles/rectangles, straight-ish strokes to lines,
+    /// and ⇧-drags draw arrows.
+    var focusTraceSnapShapes: Bool = true
+    /// Keep strokes on screen instead of fading them (⌘Z undo, ⌘⌫ clear).
+    var focusTracePersistentInk: Bool = false
+    var focusTraceRipples: Bool = false
+    /// Final ripple radius in points.
+    var focusTraceRippleSize: Double = 10
+    var focusTraceSpotlight: Bool = false
+    var focusTraceSpotlightRadius: Double = 150
+    /// How dark the area outside the spotlight gets, 0–1.
+    var focusTraceSpotlightDim: Double = 0.55
+    /// Pinch on the trackpad to zoom where the cursor is.
+    var focusTraceMagnifier: Bool = true
+    var focusTraceMagnifierSize: Double = 240
+    var focusTraceBlackHotkey: Hotkey? = AppSettings.defaultBlackHotkey
+    var focusTraceWhiteHotkey: Hotkey? = AppSettings.defaultWhiteHotkey
+    /// Which screen(s) the blank-screen shortcuts cover: "all", "pointer"
+    /// (the screen with the cursor), or a display's localized name.
+    var focusTraceBlankTarget: String = "all"
+
+    static let defaultBlackHotkey = Hotkey(keyCode: 11, modifiers: UInt32(Hotkey.controlKeyMask | Hotkey.optionKeyMask))
+    static let defaultWhiteHotkey = Hotkey(keyCode: 13, modifiers: UInt32(Hotkey.controlKeyMask | Hotkey.optionKeyMask))
 
     // Behavior
     var launchAtLogin: Bool = false
@@ -203,6 +298,9 @@ struct AppSettings: Codable {
     /// Defaults to OFF: AI prompts are built from untrusted selected text, so
     /// auto-approving tool execution would be a prompt-injection risk.
     var autoApproveTools: Bool = false
+    /// Quick replace actions open the result as a reviewable diff instead of
+    /// writing it straight back over the selection.
+    var reviewChangesBeforeReplace: Bool = false
     /// Set once the first-run onboarding has been completed/dismissed.
     var hasCompletedOnboarding: Bool = false
 
@@ -233,15 +331,22 @@ struct AppSettings: Codable {
     init() {}
 
     enum CodingKeys: String, CodingKey {
-        case copilotPath, model, systemMessage, maxHistoryItems, defaultChoices
+        case copilotPath, model, reasoningEffort, autoTier, systemMessage, maxHistoryItems, defaultChoices
         case searchEngines, defaultSearchEngineID
         case modelSource, byokModels
         // Legacy single-model keys, kept for one-time migration.
         case byokType, byokBaseURL, byokAPIKey, byokBearerToken, byokWireAPI, byokAzureAPIVersion, byokModel
         case tasks, customTasks
-        case useSkillsFolder, skillsFolderPath, useMCP, mcpConfigPath, mcpServerToggles
+        case useSkillsFolder, skillsFolderPath, useMCP, mcpConfigPath, mcpServerToggles, workingFolderPath
         case launchAtLogin, showPopupAutomatically, runTimeoutSeconds, autoApproveTools, hasCompletedOnboarding
+        case reviewChangesBeforeReplace
         case clipboardHotkey
+        case focusTraceHotkey, focusTraceCursorScale, focusTraceShowHalo, focusTraceColorHex
+        case focusTraceMulticolor, focusTraceLineWidth, focusTraceFadeSeconds, focusTraceDrawMode
+        case focusTraceSnapShapes, focusTracePersistentInk, focusTraceRipples, focusTraceSpotlight
+        case focusTraceRippleSize, focusTraceSpotlightRadius, focusTraceSpotlightDim, focusTraceMagnifier, focusTraceMagnifierSize
+        case focusTraceBlackHotkey, focusTraceWhiteHotkey, focusTraceBlankTarget
+        case focusTraceCursorShape, focusTraceCursorColorHex
         case editTaskID, editTone, editFormat, editLength
     }
 
@@ -252,6 +357,8 @@ struct AppSettings: Codable {
         }
         copilotPath = v(.copilotPath, copilotPath)
         model = v(.model, model)
+        reasoningEffort = v(.reasoningEffort, reasoningEffort)
+        autoTier = v(.autoTier, autoTier)
         modelSource = v(.modelSource, modelSource)
 
         // Migrate the old single BYOK config into the new list on first load.
@@ -292,14 +399,43 @@ struct AppSettings: Codable {
 
         useSkillsFolder = v(.useSkillsFolder, useSkillsFolder)
         skillsFolderPath = v(.skillsFolderPath, skillsFolderPath)
+        workingFolderPath = v(.workingFolderPath, workingFolderPath)
         useMCP = v(.useMCP, useMCP)
         mcpConfigPath = v(.mcpConfigPath, mcpConfigPath)
         mcpServerToggles = v(.mcpServerToggles, mcpServerToggles)
         launchAtLogin = v(.launchAtLogin, launchAtLogin)
         showPopupAutomatically = v(.showPopupAutomatically, showPopupAutomatically)
         clipboardHotkey = ((try? c.decodeIfPresent(Hotkey.self, forKey: .clipboardHotkey)) ?? nil)
+        focusTraceHotkey = ((try? c.decodeIfPresent(Hotkey.self, forKey: .focusTraceHotkey)) ?? nil)
+        focusTraceCursorScale = v(.focusTraceCursorScale, focusTraceCursorScale)
+        focusTraceShowHalo = v(.focusTraceShowHalo, focusTraceShowHalo)
+        focusTraceColorHex = v(.focusTraceColorHex, focusTraceColorHex)
+        focusTraceMulticolor = v(.focusTraceMulticolor, focusTraceMulticolor)
+        focusTraceLineWidth = v(.focusTraceLineWidth, focusTraceLineWidth)
+        focusTraceFadeSeconds = v(.focusTraceFadeSeconds, focusTraceFadeSeconds)
+        focusTraceDrawMode = v(.focusTraceDrawMode, focusTraceDrawMode)
+        focusTraceSnapShapes = v(.focusTraceSnapShapes, focusTraceSnapShapes)
+        focusTracePersistentInk = v(.focusTracePersistentInk, focusTracePersistentInk)
+        focusTraceRipples = v(.focusTraceRipples, focusTraceRipples)
+        focusTraceSpotlight = v(.focusTraceSpotlight, focusTraceSpotlight)
+        focusTraceSpotlightRadius = v(.focusTraceSpotlightRadius, focusTraceSpotlightRadius)
+        focusTraceSpotlightDim = v(.focusTraceSpotlightDim, focusTraceSpotlightDim)
+        focusTraceRippleSize = v(.focusTraceRippleSize, focusTraceRippleSize)
+        focusTraceMagnifier = v(.focusTraceMagnifier, focusTraceMagnifier)
+        focusTraceMagnifierSize = v(.focusTraceMagnifierSize, focusTraceMagnifierSize)
+        focusTraceBlankTarget = v(.focusTraceBlankTarget, focusTraceBlankTarget)
+        focusTraceCursorShape = v(.focusTraceCursorShape, focusTraceCursorShape)
+        focusTraceCursorColorHex = v(.focusTraceCursorColorHex, focusTraceCursorColorHex)
+        // A stored null means the user cleared the shortcut; absence means default.
+        if c.contains(.focusTraceBlackHotkey) {
+            focusTraceBlackHotkey = (try? c.decodeIfPresent(Hotkey.self, forKey: .focusTraceBlackHotkey)) ?? nil
+        }
+        if c.contains(.focusTraceWhiteHotkey) {
+            focusTraceWhiteHotkey = (try? c.decodeIfPresent(Hotkey.self, forKey: .focusTraceWhiteHotkey)) ?? nil
+        }
         runTimeoutSeconds = v(.runTimeoutSeconds, runTimeoutSeconds)
         autoApproveTools = v(.autoApproveTools, autoApproveTools)
+        reviewChangesBeforeReplace = v(.reviewChangesBeforeReplace, reviewChangesBeforeReplace)
         hasCompletedOnboarding = v(.hasCompletedOnboarding, hasCompletedOnboarding)
         editTaskID = ((try? c.decodeIfPresent(String.self, forKey: .editTaskID)) ?? nil)
         editTone = ((try? c.decodeIfPresent(Tone.self, forKey: .editTone)) ?? nil)
@@ -311,6 +447,8 @@ struct AppSettings: Codable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(copilotPath, forKey: .copilotPath)
         try c.encode(model, forKey: .model)
+        try c.encode(reasoningEffort, forKey: .reasoningEffort)
+        try c.encode(autoTier, forKey: .autoTier)
         try c.encode(modelSource, forKey: .modelSource)
         try c.encode(byokModels, forKey: .byokModels)
         try c.encode(systemMessage, forKey: .systemMessage)
@@ -321,14 +459,38 @@ struct AppSettings: Codable {
         try c.encode(tasks, forKey: .tasks)
         try c.encode(useSkillsFolder, forKey: .useSkillsFolder)
         try c.encode(skillsFolderPath, forKey: .skillsFolderPath)
+        try c.encode(workingFolderPath, forKey: .workingFolderPath)
         try c.encode(useMCP, forKey: .useMCP)
         try c.encode(mcpConfigPath, forKey: .mcpConfigPath)
         try c.encode(mcpServerToggles, forKey: .mcpServerToggles)
         try c.encode(launchAtLogin, forKey: .launchAtLogin)
         try c.encode(showPopupAutomatically, forKey: .showPopupAutomatically)
         try c.encodeIfPresent(clipboardHotkey, forKey: .clipboardHotkey)
+        try c.encodeIfPresent(focusTraceHotkey, forKey: .focusTraceHotkey)
+        try c.encode(focusTraceCursorScale, forKey: .focusTraceCursorScale)
+        try c.encode(focusTraceShowHalo, forKey: .focusTraceShowHalo)
+        try c.encode(focusTraceColorHex, forKey: .focusTraceColorHex)
+        try c.encode(focusTraceMulticolor, forKey: .focusTraceMulticolor)
+        try c.encode(focusTraceLineWidth, forKey: .focusTraceLineWidth)
+        try c.encode(focusTraceFadeSeconds, forKey: .focusTraceFadeSeconds)
+        try c.encode(focusTraceDrawMode, forKey: .focusTraceDrawMode)
+        try c.encode(focusTraceSnapShapes, forKey: .focusTraceSnapShapes)
+        try c.encode(focusTracePersistentInk, forKey: .focusTracePersistentInk)
+        try c.encode(focusTraceRipples, forKey: .focusTraceRipples)
+        try c.encode(focusTraceSpotlight, forKey: .focusTraceSpotlight)
+        try c.encode(focusTraceSpotlightRadius, forKey: .focusTraceSpotlightRadius)
+        try c.encode(focusTraceSpotlightDim, forKey: .focusTraceSpotlightDim)
+        try c.encode(focusTraceRippleSize, forKey: .focusTraceRippleSize)
+        try c.encode(focusTraceMagnifier, forKey: .focusTraceMagnifier)
+        try c.encode(focusTraceMagnifierSize, forKey: .focusTraceMagnifierSize)
+        try c.encode(focusTraceBlackHotkey, forKey: .focusTraceBlackHotkey)
+        try c.encode(focusTraceWhiteHotkey, forKey: .focusTraceWhiteHotkey)
+        try c.encode(focusTraceBlankTarget, forKey: .focusTraceBlankTarget)
+        try c.encode(focusTraceCursorShape, forKey: .focusTraceCursorShape)
+        try c.encode(focusTraceCursorColorHex, forKey: .focusTraceCursorColorHex)
         try c.encode(runTimeoutSeconds, forKey: .runTimeoutSeconds)
         try c.encode(autoApproveTools, forKey: .autoApproveTools)
+        try c.encode(reviewChangesBeforeReplace, forKey: .reviewChangesBeforeReplace)
         try c.encode(hasCompletedOnboarding, forKey: .hasCompletedOnboarding)
         try c.encodeIfPresent(editTaskID, forKey: .editTaskID)
         try c.encodeIfPresent(editTone, forKey: .editTone)

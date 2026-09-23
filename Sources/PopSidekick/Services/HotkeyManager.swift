@@ -17,9 +17,11 @@ final class HotkeyManager {
     private var registrations: [UInt32: Registration] = [:]
     private var nextID: UInt32 = 1
     private var eventHandler: EventHandlerRef?
-    private static let signature: OSType = 0x50534b59 // 'PSKY'
+    private let signature: OSType
 
-    init() {
+    /// Each manager needs a distinct signature so several can coexist.
+    init(signature: OSType = 0x50534b59 /* 'PSKY' */) {
+        self.signature = signature
         installHandler()
     }
 
@@ -32,10 +34,12 @@ final class HotkeyManager {
     /// Reserved action id used for the "open clipboard history" global hotkey,
     /// distinguishable from any task id (task ids are UUID strings).
     static let clipboardHistoryActionID = "__clipboard_history__"
+    /// Reserved action id for the FocusTrace on/off global hotkey.
+    static let focusTraceActionID = "__focus_trace__"
 
     /// Re-registers all hotkeys from the given tasks plus the optional clipboard
     /// history shortcut, replacing any prior set.
-    func register(tasks: [TaskDef], clipboardHotkey: Hotkey? = nil) {
+    func register(tasks: [TaskDef], clipboardHotkey: Hotkey? = nil, focusTraceHotkey: Hotkey? = nil) {
         unregisterAll()
         for task in tasks {
             guard let hk = task.hotkey else { continue }
@@ -44,12 +48,23 @@ final class HotkeyManager {
         if let clipboardHotkey {
             register(hotkey: clipboardHotkey, taskID: HotkeyManager.clipboardHistoryActionID)
         }
+        if let focusTraceHotkey {
+            register(hotkey: focusTraceHotkey, taskID: HotkeyManager.focusTraceActionID)
+        }
     }
+
+    /// Replaces all registrations with the given action-id → hotkey bindings.
+    func registerActions(_ actions: [(id: String, hotkey: Hotkey)]) {
+        unregisterAll()
+        for a in actions { register(hotkey: a.hotkey, taskID: a.id) }
+    }
+
+    func unregisterAllHotkeys() { unregisterAll() }
 
     private func register(hotkey: Hotkey, taskID: String) {
         let id = nextID
         nextID += 1
-        let hotKeyID = EventHotKeyID(signature: HotkeyManager.signature, id: id)
+        let hotKeyID = EventHotKeyID(signature: signature, id: id)
         var ref: EventHotKeyRef?
         let status = RegisterEventHotKey(hotkey.keyCode,
                                          hotkey.modifiers,
@@ -83,8 +98,11 @@ final class HotkeyManager {
                                            MemoryLayout<EventHotKeyID>.size,
                                            nil,
                                            &hotKeyID)
-            guard status == noErr, hotKeyID.signature == HotkeyManager.signature else { return noErr }
             let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
+            // Leave other managers' hotkeys to their own handlers.
+            guard status == noErr, hotKeyID.signature == manager.signature else {
+                return OSStatus(eventNotHandledErr)
+            }
             let id = hotKeyID.id
             DispatchQueue.main.async {
                 guard let taskID = manager.registrations[id]?.taskID else { return }

@@ -4,6 +4,65 @@ import Combine
 struct ModelOption: Identifiable, Hashable {
     var id: String
     var name: String
+    /// Reasoning efforts the model accepts (empty = not configurable).
+    var efforts: [String] = []
+    var defaultEffort: String?
+}
+
+/// Reasoning effort levels accepted by the Copilot SDK, lowest to highest.
+enum ReasoningLevel {
+    static let all = ["low", "medium", "high", "xhigh", "max"]
+    static func label(_ e: String) -> String {
+        switch e {
+        case "": return "Model default"
+        case "xhigh": return "Extra high"
+        default: return e.capitalized
+        }
+    }
+    static func icon(_ e: String) -> String {
+        switch e {
+        case "low": return "gauge.with.dots.needle.0percent"
+        case "medium": return "gauge.with.dots.needle.33percent"
+        case "high": return "gauge.with.dots.needle.50percent"
+        case "xhigh": return "gauge.with.dots.needle.67percent"
+        case "max": return "gauge.with.dots.needle.100percent"
+        default: return "gauge.with.dots.needle.bottom.50percent"
+        }
+    }
+    /// The requested effort if the model supports it, otherwise the closest
+    /// supported level; nil when the model has no configurable effort.
+    static func resolve(_ requested: String, supported: [String]) -> String? {
+        guard !requested.isEmpty, !supported.isEmpty else { return nil }
+        if supported.contains(requested) { return requested }
+        let r = all.firstIndex(of: requested) ?? 0
+        return supported.min { a, b in
+            abs((all.firstIndex(of: a) ?? 0) - r) < abs((all.firstIndex(of: b) ?? 0) - r)
+        }
+    }
+}
+
+/// Auto model routing tiers (used only when the model is "auto").
+enum AutoTierOption {
+    static let all = ["fast", "efficiency", "balance", "intelligence"]
+    static func label(_ t: String) -> String {
+        switch t {
+        case "": return "Default"
+        case "fast": return "Fast"
+        case "efficiency": return "Efficient"
+        case "balance": return "Balanced"
+        case "intelligence": return "Smartest"
+        default: return t.capitalized
+        }
+    }
+    static func icon(_ t: String) -> String {
+        switch t {
+        case "fast": return "hare"
+        case "efficiency": return "leaf"
+        case "balance": return "scalemass"
+        case "intelligence": return "brain"
+        default: return "wand.and.sparkles"
+        }
+    }
 }
 
 /// One result stream produced by a `run` request (possibly multiple choices).
@@ -71,6 +130,7 @@ final class CopilotService: ObservableObject {
 
         var env = ProcessInfo.processInfo.environment
         env["POPSIDEKICK_COPILOT_PATH"] = SettingsStore.shared.settings.copilotPath
+        env["POPSIDEKICK_VERSION"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
         // Ensure node and copilot can be found on PATH.
         let extraPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         let existing = env["PATH"] ?? ""
@@ -194,7 +254,8 @@ final class CopilotService: ObservableObject {
     }
 
     @discardableResult
-    func run(prompt: String, model: String, choices: Int, attachments: [[String: Any]]? = nil) -> RunHandle {
+    func run(prompt: String, model: String, choices: Int, attachments: [[String: Any]]? = nil,
+             reasoningEffort: String? = nil, autoTier: String? = nil) -> RunHandle {
         ensureStarted()
         let settings = SettingsStore.shared.settings
         let id = UUID().uuidString
@@ -212,13 +273,15 @@ final class CopilotService: ObservableObject {
         ]
         // When the user picked a configured BYOK model, route the run through its
         // provider; otherwise it's a Copilot model and needs no provider.
-        if model.hasPrefix(Self.byokPrefix) {
-            if let byok = settings.byokModels.first(where: { $0.optionID == model }),
-               byok.isConfigured, let provider = Self.byokProviderPayload(byok) {
-                payload["provider"] = provider
-                payload["model"] = byok.model.trimmingCharacters(in: .whitespacesAndNewlines)
-            } else {
-                payload["model"] = "auto"
+        Self.applyModelRouting(&payload, model: model, settings: settings)
+        if payload["provider"] == nil {
+            if model == "auto" {
+                let tier = autoTier ?? settings.autoTier
+                if !tier.isEmpty { payload["autoTier"] = tier }
+            } else if let opt = models.first(where: { $0.id == model }),
+                      let effort = ReasoningLevel.resolve(reasoningEffort ?? settings.reasoningEffort,
+                                                          supported: opt.efforts) {
+                payload["reasoningEffort"] = effort
             }
         }
         if let attachments, !attachments.isEmpty {
@@ -228,14 +291,18 @@ final class CopilotService: ObservableObject {
         if timeoutSeconds > 0 {
             payload["timeoutMs"] = timeoutSeconds * 1000
         }
+        if !settings.workingFolderPath.isEmpty {
+            payload["workingDirectory"] = SettingsStore.expand(settings.workingFolderPath)
+        }
         if settings.useSkillsFolder, !settings.skillsFolderPath.isEmpty {
             payload["skillDirectories"] = [SettingsStore.expand(settings.skillsFolderPath)]
             payload["enableConfigDiscovery"] = true
         }
         if settings.useMCP {
-            if let servers = Self.loadMCPServers(settings: settings) {
-                payload["mcpServers"] = servers
-            }
+            if let servers = Self.loadMCPServers(settings: settings) { payload["mcpServers"] = servers }
+            // Let the SDK skip disabled servers, including ones found via config discovery.
+            let disabled = settings.mcpServerToggles.filter { !$0.enabled }.map(\.name)
+            if !disabled.isEmpty { payload["disabledMcpServers"] = disabled }
         }
         send(payload)
         // Swift-side backstop: if the bridge itself hangs (no event at all),
@@ -246,7 +313,20 @@ final class CopilotService: ObservableObject {
         return handle
     }
 
-    /// Schedules (or reschedules) the inactivity watchdog for a run.
+    /// Resolves a picker model id into the `model`/`provider` payload keys.
+    /// BYOK ids route through the stored provider; Copilot ids pass through.
+    private static func applyModelRouting(_ payload: inout [String: Any], model: String, settings: AppSettings) {
+        payload["model"] = model
+        guard model.hasPrefix(byokPrefix) else { return }
+        if let byok = settings.byokModels.first(where: { $0.optionID == model }),
+           byok.isConfigured, let provider = byokProviderPayload(byok) {
+            payload["provider"] = provider
+            payload["model"] = byok.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            payload["model"] = "auto"
+        }
+    }
+
     private func scheduleTimeout(for id: String, seconds: TimeInterval) {
         runTimers[id]?.invalidate()
         runTimers[id] = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
@@ -301,6 +381,11 @@ final class CopilotService: ObservableObject {
 
     private func ingest(_ data: Data) {
         stdoutBuffer.append(data)
+        // Guard against a runaway line with no newline (bridge events are small).
+        if stdoutBuffer.count > 32 * 1024 * 1024, stdoutBuffer.firstIndex(of: 0x0A) == nil {
+            stdoutBuffer.removeAll(keepingCapacity: false)
+            return
+        }
         while let nl = stdoutBuffer.firstIndex(of: 0x0A) {
             let lineData = stdoutBuffer.subdata(in: stdoutBuffer.startIndex..<nl)
             stdoutBuffer.removeSubrange(stdoutBuffer.startIndex...nl)
@@ -321,7 +406,9 @@ final class CopilotService: ObservableObject {
             let arr = event["models"] as? [[String: Any]] ?? []
             var opts = arr.compactMap { dict -> ModelOption? in
                 guard let id = dict["id"] as? String else { return nil }
-                return ModelOption(id: id, name: dict["name"] as? String ?? id)
+                return ModelOption(id: id, name: dict["name"] as? String ?? id,
+                                   efforts: dict["efforts"] as? [String] ?? [],
+                                   defaultEffort: dict["defaultEffort"] as? String)
             }
             if !opts.contains(where: { $0.id == "auto" }) {
                 opts.insert(ModelOption(id: "auto", name: "Auto"), at: 0)
@@ -384,8 +471,10 @@ final class CopilotService: ObservableObject {
             try? fm.removeItem(at: url)
         }
         if !fm.fileExists(atPath: url.path) {
-            fm.createFile(atPath: url.path, contents: nil)
+            fm.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
         }
+        // May contain prompts or provider errors; keep it private.
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
         _ = try? handle.seekToEnd()
         return handle
@@ -449,16 +538,18 @@ final class CopilotService: ObservableObject {
         return nil
     }
 
-    /// Loads enabled MCP servers from the configured mcp.json file.
+    /// Loads the MCP servers from the configured mcp.json file. Disabled ones are
+    /// sent separately as `disabledMcpServers` so the SDK doesn't start them.
     private static func loadMCPServers(settings: AppSettings) -> [String: Any]? {
         let path = SettingsStore.expand(settings.mcpConfigPath)
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
-        // Support both { "mcpServers": {...} } and a bare object of servers.
-        let servers = (json["mcpServers"] as? [String: Any]) ?? json
-        let disabled = Set(settings.mcpServerToggles.filter { !$0.enabled }.map { $0.name })
-        let filtered = servers.filter { !disabled.contains($0.key) }
-        return filtered.isEmpty ? nil : filtered
+        // Support { "mcpServers": {...} }, { "servers": {...} } (VS Code style),
+        // and a bare object of servers.
+        let servers = (json["mcpServers"] as? [String: Any])
+            ?? (json["servers"] as? [String: Any])
+            ?? json
+        return servers.isEmpty ? nil : servers
     }
 }

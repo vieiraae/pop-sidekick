@@ -82,6 +82,7 @@ final class ClipboardStore: ObservableObject {
         bookmarksURL = dir.appendingPathComponent("bookmarks.json")
         imagesDir = dir.appendingPathComponent("images", isDirectory: true)
         try? fm.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: imagesDir.path)
         load()
     }
 
@@ -99,6 +100,9 @@ final class ClipboardStore: ObservableObject {
         for url in [historyURL, bookmarksURL] where fm.fileExists(atPath: url.path) {
             try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         }
+        for file in (try? fm.contentsOfDirectory(at: imagesDir, includingPropertiesForKeys: nil)) ?? [] {
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        }
     }
 
     /// Decodes a clip array, hydrating external image bytes. A file that exists
@@ -108,8 +112,14 @@ final class ClipboardStore: ObservableObject {
         do {
             var items = try JSONDecoder().decode([ClipItem].self, from: data)
             for i in items.indices {
-                if let name = items[i].imageFile {
-                    items[i].imageData = try? Data(contentsOf: imagesDir.appendingPathComponent(name))
+                guard let name = items[i].imageFile else { continue }
+                // Only accept names this store generates, so an edited JSON file
+                // can't point outside the images folder or at a huge file.
+                guard Self.isImageName(name) else { items[i].imageFile = nil; continue }
+                let url = imagesDir.appendingPathComponent(name)
+                let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+                if size > 0, size <= maxImageBytes {
+                    items[i].imageData = try? Data(contentsOf: url)
                 }
             }
             return items
@@ -152,8 +162,15 @@ final class ClipboardStore: ObservableObject {
         let url = imagesDir.appendingPathComponent(name)
         if !FileManager.default.fileExists(atPath: url.path) {
             try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         }
         return name
+    }
+
+    /// `<sha256 hex>.png`, the only filenames `storeImage` produces.
+    private static func isImageName(_ name: String) -> Bool {
+        guard name.count == 68, name.hasSuffix(".png") else { return false }
+        return name.dropLast(4).allSatisfy { $0.isHexDigit && !$0.isUppercase }
     }
 
     /// Deletes image files no longer referenced by any history/bookmark item.

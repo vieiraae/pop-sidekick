@@ -31,8 +31,10 @@ final class SelectionMonitor {
     /// How many times to re-probe the Accessibility API before giving up. The
     /// AX `kAXSelectedText` attribute often lags a frame or two behind the
     /// actual mouse/keyboard selection, so a single probe races and randomly
-    /// misses real selections. Polling a few times closes that gap.
-    private let maxPollAttempts = 5
+    /// misses real selections. Polling several times closes that gap — some
+    /// apps (notably Terminal) update the attribute noticeably late, so the
+    /// window is kept generous.
+    private let maxPollAttempts = 8
     private let pollInterval: TimeInterval = 0.07
 
     /// Bumped on every `keyUp` so that a burst of typing coalesces into a single

@@ -39,3 +39,36 @@ struct AnimatedBorder: View {
         }
     }
 }
+
+/// Subtle colorful palette shared by the "working" indicators.
+private let workingColors: [Color] = [
+    .pink, .purple, .blue, .cyan, .teal, .green, .yellow, .orange, .pink,
+]
+
+
+/// An SF Symbol that gently cycles through the working palette while `active`.
+struct AnimatedIcon: View {
+    let systemName: String
+    var active: Bool
+
+    var body: some View {
+        if active {
+            Image(systemName: systemName)
+                .hidden()
+                .overlay(
+                    TimelineView(.animation) { context in
+                        let t = context.date.timeIntervalSinceReferenceDate
+                        LinearGradient(
+                            gradient: Gradient(colors: workingColors),
+                            startPoint: .leading, endPoint: .trailing
+                        )
+                        .hueRotation(.degrees((t * 80).truncatingRemainder(dividingBy: 360)))
+                        .mask(Image(systemName: systemName))
+                    }
+                )
+                .transition(.opacity)
+        } else {
+            Image(systemName: systemName)
+        }
+    }
+}

@@ -6,6 +6,40 @@ struct ResultItem: Identifiable {
     var choice: Int
     var text: String
     var isStreaming: Bool
+    /// The input the result was derived from (diffed against the result).
+    var source: String = ""
+    /// The prompt that produced the first version (context for follow-ups).
+    var prompt: String = ""
+    /// Earlier versions, oldest first, and the follow-up that replaced each.
+    var versions: [String] = []
+    var instructions: [String] = []
+    /// Word-level changes vs `source`, computed once streaming finishes.
+    var diff: TextDiff?
+    /// Change hunks the user rejected (the original text is kept for those).
+    var rejected: Set<Int> = []
+    /// User override for showing the diff; nil = automatic.
+    var showDiff: Bool?
+
+    /// Diffs are shown automatically when the result is a revision of the
+    /// input (mostly the same words), not for answers/summaries.
+    var diffVisible: Bool {
+        guard let diff, diff.changeCount > 0 else { return false }
+        return showDiff ?? (diff.similarity >= 0.4)
+    }
+
+    /// The text actions (copy, paste, refine, follow-up) operate on: the
+    /// revision with any rejected changes reverted.
+    var effectiveText: String {
+        guard let diff, !rejected.isEmpty else { return text }
+        return diff.merged(rejected: rejected)
+    }
+
+    mutating func finish() {
+        isStreaming = false
+        rejected = []
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        diff = trimmed.isEmpty || text.isEmpty ? nil : TextDiff(original: source, revised: text)
+    }
 }
 
 enum PopupMode {
@@ -47,6 +81,8 @@ final class PopupViewModel: ObservableObject {
     /// Free-form instruction entered in the prompt panel.
     @Published var promptText: String = ""
     @Published var model: String = "auto"
+    @Published var reasoningEffort: String = ""
+    @Published var autoTier: String = ""
     @Published var choices: Int = 1
 
     // Inline clip editing (history/bookmark items)
@@ -65,6 +101,8 @@ final class PopupViewModel: ObservableObject {
     var sourceApp: NSRunningApplication?
 
     private var currentRun: RunHandle?
+    /// Follow-up runs in flight, keyed by result id.
+    private var followUpRuns: [UUID: RunHandle] = [:]
     private let copilot = CopilotService.shared
     /// When true, the (single) result is written back over the source selection
     /// once the run finishes. Used by the compact-bar quick actions.
@@ -112,7 +150,9 @@ final class PopupViewModel: ObservableObject {
         let range = NSRange(trimmed.startIndex..., in: trimmed)
         guard let match = detector.firstMatch(in: trimmed, options: [], range: range),
               match.range == range,
-              let url = match.url else { return nil }
+              let url = match.url,
+              // Only web/mail links: other schemes can launch arbitrary URL handlers.
+              ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") else { return nil }
         return url
     }
 
@@ -125,6 +165,8 @@ final class PopupViewModel: ObservableObject {
         detectedURL = Self.firstURL(in: text)
         let settings = SettingsStore.shared.settings
         model = settings.model
+        reasoningEffort = settings.reasoningEffort
+        autoTier = settings.autoTier
         choices = max(1, settings.defaultChoices)
         // Restore persisted Edit-panel selections (nil = unset).
         taskID = settings.editTaskID
@@ -243,7 +285,7 @@ final class PopupViewModel: ObservableObject {
 
     func run(task: TaskDef) {
         let prompt = buildPrompt(instruction: task.instruction, text: selectedText, includeStyling: false)
-        startRun(prompt: prompt, replace: isEditable, statusLabel: "\(task.name)…")
+        startRun(prompt: prompt, source: selectedText, replace: isEditable, statusLabel: "\(task.name)…")
     }
 
     /// Handles a task button/menu selection from the compact bar. For editable
@@ -304,7 +346,7 @@ final class PopupViewModel: ObservableObject {
                 "displayName": "clipboard-image.png",
             ]]
         }
-        startRun(prompt: prompt, statusLabel: task.map { "\($0.name)…" } ?? "Working…",
+        startRun(prompt: prompt, source: editText, statusLabel: task.map { "\($0.name)…" } ?? "Working…",
                  attachments: attachments)
     }
 
@@ -319,7 +361,7 @@ final class PopupViewModel: ObservableObject {
         if isEditable {
             let prompt = buildPrompt(instruction: instruction, text: selectedText, includeStyling: false)
             mode = .compact
-            startRun(prompt: prompt, replace: true, statusLabel: instruction)
+            startRun(prompt: prompt, source: selectedText, replace: true, statusLabel: instruction)
         } else {
             taskID = nil
             extraInstructions = instruction
@@ -358,20 +400,24 @@ final class PopupViewModel: ObservableObject {
         return parts.joined(separator: "\n")
     }
 
-    private func startRun(prompt: String, replace: Bool = false, statusLabel: String = "Working…",
-                          attachments: [[String: Any]]? = nil) {
+    private func startRun(prompt: String, source: String = "", replace: Bool = false,
+                          statusLabel: String = "Working…", attachments: [[String: Any]]? = nil) {
         currentRun.map { copilot.cancel($0) }
+        cancelFollowUps()
         replaceOnComplete = replace
         // Replace mode always produces a single result to write back.
         let n = replace ? 1 : max(1, min(10, choices))
-        results = (0..<n).map { ResultItem(choice: $0, text: "", isStreaming: true) }
+        results = (0..<n).map {
+            ResultItem(choice: $0, text: "", isStreaming: true, source: source, prompt: prompt)
+        }
         isProcessing = true
         statusMessage = statusLabel
         // Quick replace actions stay in the compact bar (just the animated
         // border + a cancel button); only explicit Edit runs expand the editor.
         if !replace && mode == .compact { mode = .edit }
 
-        let handle = copilot.run(prompt: prompt, model: model, choices: n, attachments: attachments)
+        let handle = copilot.run(prompt: prompt, model: model, choices: n, attachments: attachments,
+                                 reasoningEffort: reasoningEffort, autoTier: autoTier)
         currentRun = handle
 
         handle.onDelta = { [weak self] choice, piece in
@@ -384,7 +430,7 @@ final class PopupViewModel: ObservableObject {
             guard let self else { return }
             if let idx = self.results.firstIndex(where: { $0.choice == choice }) {
                 self.results[idx].text = text
-                self.results[idx].isStreaming = false
+                self.results[idx].finish()
             }
         }
         handle.onError = { [weak self] message in
@@ -400,11 +446,17 @@ final class PopupViewModel: ObservableObject {
             self.isProcessing = false
             self.statusMessage = nil
             self.currentRun = nil
-            for i in self.results.indices { self.results[i].isStreaming = false }
+            for i in self.results.indices where self.results[i].isStreaming { self.results[i].finish() }
             if self.replaceOnComplete {
                 self.replaceOnComplete = false
                 let result = self.results.first?.text ?? ""
-                if !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                guard !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                if SettingsStore.shared.settings.reviewChangesBeforeReplace,
+                   self.results.first?.diff?.changeCount ?? 0 > 0 {
+                    // Let the user review (and cherry-pick) before writing back.
+                    self.results[0].showDiff = true
+                    self.expandToEdit()
+                } else {
                     self.paste(result)
                 }
             }
@@ -416,6 +468,7 @@ final class PopupViewModel: ObservableObject {
             copilot.cancel(run)
             currentRun = nil
         }
+        cancelFollowUps()
         replaceOnComplete = false
         isProcessing = false
         statusMessage = "Cancelled"
@@ -427,6 +480,106 @@ final class PopupViewModel: ObservableObject {
     func refine(_ text: String) {
         editText = text
         mode = .edit
+    }
+
+    // MARK: Diff review
+
+    func toggleChange(_ resultID: UUID, _ index: Int) {
+        guard let i = results.firstIndex(where: { $0.id == resultID }) else { return }
+        if results[i].rejected.contains(index) { results[i].rejected.remove(index) }
+        else { results[i].rejected.insert(index) }
+    }
+
+    func setAllChanges(_ resultID: UUID, accepted: Bool) {
+        guard let i = results.firstIndex(where: { $0.id == resultID }) else { return }
+        results[i].rejected = accepted ? [] : Set(0..<(results[i].diff?.changeCount ?? 0))
+    }
+
+    func toggleDiff(_ resultID: UUID) {
+        guard let i = results.firstIndex(where: { $0.id == resultID }) else { return }
+        results[i].showDiff = !results[i].diffVisible
+    }
+
+    // MARK: Follow-ups
+
+    /// Revises one result with a follow-up instruction ("shorter", "more
+    /// formal"…). The original request and the conversation so far are sent as
+    /// context, and the reply replaces the result (earlier versions are kept).
+    func followUp(_ resultID: UUID, instruction raw: String) {
+        let instruction = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty,
+              let i = results.firstIndex(where: { $0.id == resultID }),
+              !results[i].isStreaming else { return }
+        var item = results[i]
+        let current = item.effectiveText
+        var parts = [item.prompt, "", "--- Conversation so far ---"]
+        for (k, version) in item.versions.enumerated() {
+            parts.append("Assistant:\n\(version)")
+            if k < item.instructions.count { parts.append("User: \(item.instructions[k])") }
+        }
+        parts.append("Assistant:\n\(current)")
+        parts.append("User: \(instruction)")
+        parts.append("")
+        parts.append("Apply the user's latest request to your last answer. Reply with only the resulting text.")
+        let prompt = parts.joined(separator: "\n")
+
+        item.versions.append(current)
+        item.instructions.append(instruction)
+        item.text = ""
+        item.diff = nil
+        item.rejected = []
+        item.isStreaming = true
+        results[i] = item
+
+        followUpRuns[resultID].map { copilot.cancel($0) }
+        let handle = copilot.run(prompt: prompt, model: model, choices: 1,
+                                 reasoningEffort: reasoningEffort, autoTier: autoTier)
+        followUpRuns[resultID] = handle
+        isProcessing = true
+        statusMessage = nil
+
+        handle.onDelta = { [weak self] _, piece in
+            guard let self, let j = self.results.firstIndex(where: { $0.id == resultID }) else { return }
+            self.results[j].text += piece
+        }
+        handle.onResult = { [weak self] _, text in
+            guard let self, let j = self.results.firstIndex(where: { $0.id == resultID }) else { return }
+            self.results[j].text = text
+            self.results[j].finish()
+        }
+        handle.onError = { [weak self] message in
+            guard let self else { return }
+            self.endFollowUp(resultID)
+            self.statusMessage = message
+            // Restore the previous version so the error doesn't leave it empty.
+            if let j = self.results.firstIndex(where: { $0.id == resultID }),
+               self.results[j].text.isEmpty { self.revertVersion(resultID) }
+        }
+        handle.onDone = { [weak self] in self?.endFollowUp(resultID) }
+    }
+
+    /// Steps a result back to its previous version.
+    func revertVersion(_ resultID: UUID) {
+        guard let i = results.firstIndex(where: { $0.id == resultID }),
+              let previous = results[i].versions.popLast() else { return }
+        if !results[i].instructions.isEmpty { results[i].instructions.removeLast() }
+        followUpRuns.removeValue(forKey: resultID).map { copilot.cancel($0) }
+        results[i].text = previous
+        results[i].finish()
+        if followUpRuns.isEmpty && currentRun == nil { isProcessing = false }
+    }
+
+    private func endFollowUp(_ resultID: UUID) {
+        followUpRuns[resultID] = nil
+        if let j = results.firstIndex(where: { $0.id == resultID }), results[j].isStreaming {
+            results[j].finish()
+        }
+        if followUpRuns.isEmpty && currentRun == nil { isProcessing = false }
+    }
+
+    private func cancelFollowUps() {
+        for handle in followUpRuns.values { copilot.cancel(handle) }
+        followUpRuns.removeAll()
     }
 
     // MARK: - Clip editing
@@ -461,6 +614,8 @@ final class PopupViewModel: ObservableObject {
         // Mirror the popup Edit window's current values.
         let settings = SettingsStore.shared.settings
         model = settings.model
+        reasoningEffort = settings.reasoningEffort
+        autoTier = settings.autoTier
         choices = max(1, settings.defaultChoices)
         taskID = settings.editTaskID
         tone = settings.editTone
@@ -535,6 +690,7 @@ final class PopupViewModel: ObservableObject {
 
     func forceClose() {
         if let run = currentRun { copilot.cancel(run) }
+        cancelFollowUps()
         onRequestClose?()
     }
 }

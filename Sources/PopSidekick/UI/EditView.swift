@@ -107,6 +107,8 @@ struct EditView: View {
                 .help("Model")
                 .tooltip("Model")
 
+                modelTuningMenu
+
                 HStack(spacing: 4) {
                     Image(systemName: "number")
                         .foregroundStyle(.secondary)
@@ -139,6 +141,48 @@ struct EditView: View {
                     .tooltip("Run (⌘↩)")
                 }
             }
+        }
+    }
+
+    /// Auto routing tier when the model is Auto, otherwise reasoning effort for
+    /// models that support it. Hidden for anything else (e.g. BYOK).
+    @ViewBuilder
+    private var modelTuningMenu: some View {
+        if vm.model == "auto" {
+            Menu {
+                Picker("Auto routing", selection: $vm.autoTier) {
+                    ForEach([""] + AutoTierOption.all, id: \.self) { t in
+                        Label(AutoTierOption.label(t), systemImage: AutoTierOption.icon(t)).tag(t)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Image(systemName: AutoTierOption.icon(vm.autoTier))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Auto routing: \(AutoTierOption.label(vm.autoTier))")
+            .tooltip("Auto routing: \(AutoTierOption.label(vm.autoTier))")
+        } else if let opt = copilot.models.first(where: { $0.id == vm.model }), !opt.efforts.isEmpty {
+            let current = ReasoningLevel.resolve(vm.reasoningEffort, supported: opt.efforts) ?? ""
+            let defaultLabel = opt.defaultEffort.map { "Model default (\(ReasoningLevel.label($0)))" } ?? "Model default"
+            Menu {
+                Picker("Reasoning effort", selection: $vm.reasoningEffort) {
+                    Label(defaultLabel, systemImage: ReasoningLevel.icon("")).tag("")
+                    ForEach(opt.efforts, id: \.self) { e in
+                        Label(ReasoningLevel.label(e), systemImage: ReasoningLevel.icon(e)).tag(e)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Image(systemName: ReasoningLevel.icon(current))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Reasoning effort: \(ReasoningLevel.label(current))")
+            .tooltip("Reasoning effort: \(ReasoningLevel.label(current))")
         }
     }
 

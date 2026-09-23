@@ -118,6 +118,26 @@ extension NSImage {
     }
 }
 
+/// Decoded clip images, so list rows don't rebuild an NSImage from PNG bytes
+/// on every SwiftUI body evaluation.
+@MainActor
+enum ClipImageCache {
+    private static let cache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.countLimit = 64
+        return c
+    }()
+
+    static func image(for item: ClipItem) -> NSImage? {
+        guard let data = item.content.imageData else { return nil }
+        let key = (item.imageFile ?? item.id.uuidString) as NSString
+        if let hit = cache.object(forKey: key) { return hit }
+        guard let image = NSImage(data: data) else { return nil }
+        cache.setObject(image, forKey: key)
+        return image
+    }
+}
+
 /// A clipboard-history image thumbnail that stays compact (about two lines
 /// tall). Hovering does NOT resize the row; instead it opens a floating preview
 /// panel beside the cursor showing the image at its natural size. The panel
@@ -169,8 +189,58 @@ struct ClipboardHistoryView: View {
         )
     }
 
-    private var items: [ClipItem] {
+    /// Kind filter chips; `nil` shows everything.
+    private enum Filter: String, CaseIterable, Identifiable {
+        case all, text, rich, link, image, file
+        var id: String { rawValue }
+        var icon: String {
+            switch self {
+            case .all: return "square.grid.2x2"
+            case .text: return "text.alignleft"
+            case .rich: return "textformat"
+            case .link: return "link"
+            case .image: return "photo"
+            case .file: return "doc"
+            }
+        }
+        var title: String {
+            switch self {
+            case .all: return "All"
+            case .text: return "Plain text"
+            case .rich: return "Rich text"
+            case .link: return "Links"
+            case .image: return "Images"
+            case .file: return "Files"
+            }
+        }
+        func matches(_ kind: ClipKind) -> Bool {
+            switch self {
+            case .all: return true
+            case .text: return kind == .text
+            case .rich: return kind == .richText
+            case .link: return kind == .link
+            case .image: return kind == .image
+            case .file: return kind == .file
+            }
+        }
+    }
+
+    @State private var query = ""
+    @State private var filter: Filter = .all
+    @FocusState private var searchFocused: Bool
+
+    private var allItems: [ClipItem] {
         vm.clipboardTab == .bookmarks ? clipboard.bookmarks : clipboard.history
+    }
+
+    private var items: [ClipItem] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        return allItems.filter { item in
+            guard filter.matches(item.kind) else { return false }
+            guard !q.isEmpty else { return true }
+            return item.text.localizedCaseInsensitiveContains(q)
+                || item.preview.localizedCaseInsensitiveContains(q)
+        }
     }
 
     var body: some View {
@@ -183,8 +253,11 @@ struct ClipboardHistoryView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            if !allItems.isEmpty { searchBar }
             if items.isEmpty {
-                Text(vm.clipboardTab == .bookmarks ? "No bookmarks yet." : "No clipboard history yet.")
+                Text(allItems.isEmpty
+                     ? (vm.clipboardTab == .bookmarks ? "No bookmarks yet." : "No clipboard history yet.")
+                     : "No matching clips.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 16)
@@ -205,6 +278,39 @@ struct ClipboardHistoryView: View {
         .padding(12)
         .frame(width: Metrics.editWidth)
         .arrowCursor()
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Search clips", text: $query)
+                    .textFieldStyle(.plain)
+                    .font(.callout)
+                    .focused($searchFocused)
+                if !query.isEmpty {
+                    Button { query = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear search")
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.primary.opacity(0.06)))
+            HStack(spacing: 0) {
+                ForEach(Filter.allCases) { f in
+                    IconButton(systemName: f.icon, help: f.title, prominent: filter == f) {
+                        filter = f
+                    }
+                }
+            }
+        }
+        .onAppear { DispatchQueue.main.async { searchFocused = true } }
     }
 
     private var header: some View {
@@ -270,10 +376,15 @@ private struct ClipboardHistoryRow: View {
         .help("Double-click to paste")
     }
 
+    /// ⌥ held → plain text (images and files keep their own format).
+    private func style(default fallback: PasteStyle) -> PasteStyle {
+        NSEvent.modifierFlags.contains(.option) && !item.isImage ? .plainText : fallback
+    }
+
     /// Double-click action: paste into the source app, or copy when the source
     /// selection isn't editable. Rich-text clips are pasted as plain text.
     private func primaryPaste() {
-        let style: PasteStyle = item.hasRichText ? .plainText : .source
+        let style = style(default: item.hasRichText ? .plainText : .source)
         if vm.isEditable {
             vm.paste(item.content, style: style)
         } else {
@@ -287,9 +398,16 @@ private struct ClipboardHistoryRow: View {
               let tiff = image.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff),
               let png = rep.representation(using: .png, properties: [:]) else { return }
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("sidekick-\(UUID().uuidString).png")
+        // Per-user private folder; previous previews are removed so clipboard
+        // images don't pile up outside the protected store.
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("PopSidekickPreview", isDirectory: true)
+        try? fm.removeItem(at: dir)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o700])
+        let url = dir.appendingPathComponent("Clipboard Image.png")
         guard (try? png.write(to: url)) != nil else { return }
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         let preview = URL(fileURLWithPath: "/System/Applications/Preview.app")
         let config = NSWorkspace.OpenConfiguration()
         NSWorkspace.shared.open([url], withApplicationAt: preview, configuration: config)
@@ -319,7 +437,7 @@ private struct ClipboardHistoryRow: View {
     private var preview: some View {
         switch item.kind {
         case .image:
-            if let image = item.content.image {
+            if let image = ClipImageCache.image(for: item) {
                 HStack(spacing: 6) {
                     Image(systemName: "photo")
                         .font(.callout)
@@ -357,12 +475,12 @@ private struct ClipboardHistoryRow: View {
                         vm.extractTextFromImage(item)
                     }
                 }
-                IconButton(systemName: "clipboard", help: "Paste") {
-                    vm.paste(item.content, style: .source)
+                IconButton(systemName: "clipboard", help: item.isImage ? "Paste" : "Paste (⌥ plain text)") {
+                    vm.paste(item.content, style: style(default: .source))
                 }
             }
-            IconButton(systemName: "doc.on.doc", help: "Copy") {
-                vm.copy(item.content, style: .source)
+            IconButton(systemName: "doc.on.doc", help: item.isImage ? "Copy" : "Copy (⌥ plain text)") {
+                vm.copy(item.content, style: style(default: .source))
             }
             if item.isImage {
                 IconButton(systemName: "eye", help: "Open in Preview") {

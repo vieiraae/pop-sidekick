@@ -19,7 +19,9 @@ that drives the Copilot SDK over NDJSON.
 - **Read-only aware** — on non-editable text, write actions (Cut/Paste) are
   hidden; tasks open the editor and run automatically.
 - **Clipboard window** — a dedicated **History / Bookmarks** window (global
-  hotkey) for text, rich text, images, files, links. Double-click to paste;
+  hotkey) for text, rich text, images, files, links, with **search** and kind
+  filter chips (text / rich / link / image / file). Double-click to paste
+  (hold **⌥** to paste or copy as plain text);
   hover-revealed per-item actions: paste, copy, OCR / open / save image,
   **Edit with Copilot**, bookmark, delete. Compact image thumbnails expand into a
   floating full-size preview on hover. Concealed/transient clips (password
@@ -27,10 +29,35 @@ that drives the Copilot SDK over NDJSON.
 - **Tasks** — Proofread, Rewrite, Synonyms, Minor/Major revise, Describe, Answer,
   Explain, Expand, Summarize, plus custom tasks; bindable to global hotkeys.
 - **Edit panel** — editable text (or an image preview attached on Run), Task /
-  Tone / Format / Length pickers, extra instructions (↩ to run), model picker,
-  choices slider. Each result: Refine, Copy, Paste.
+  Tone / Format / Length pickers, extra instructions (↩ to run), model picker
+  with a reasoning-effort (or Auto routing tier) menu, choices slider. Each result: Refine, Copy, Paste
+  (⌥ = plain text).
+- **Review changes** — revisions show an inline word-level diff (insertions in
+  green, deletions struck through). Click any change to reject/restore it, or
+  Accept all / Reject all; copy, paste, and refine use the cherry-picked text.
+  Optional *Review AI changes before replacing text* (Settings → Behavior) makes
+  quick actions open the diff instead of replacing the selection immediately.
+- **Follow-ups** — revise a result conversationally ("shorter", "translate to
+  Portuguese", or quick presets); each follow-up keeps the prior context and
+  versions, with a back button to return to the previous version.
 - **Models** — Copilot models or **BYOK** (OpenAI, Azure, Anthropic, Ollama,
   Foundry Local, OpenAI-compatible) with per-model Test Connection.
+- **FocusTrace** — a presentation aid: magnifies the cursor under a liquid-glass
+  halo, and dragging draws a colorful, glassy trace that fades away. Toggle from
+  the menu bar or a global hotkey; drags can pass through, be captured, or draw
+  only while ⌥ is held (Esc exits capture modes). Extras:
+  - **Pinch magnifier** — spread two fingers on the trackpad to zoom a live lens
+    where the cursor is (needs Screen Recording).
+  - **Smart shapes** — ⇧-drag draws an arrow, ⇧⌥-drag draws a box, and
+    circling or boxing something pins a clean ellipse/rectangle with **✕**
+    (dismiss), **copy** (puts the screen content inside the shape on the
+    clipboard as an image, without the ink), and **✨** (Copilot explains the
+    circled region).
+  - **Blank screen** — ⌃⌥B black / ⌃⌥W white on all screens, the pointer's
+    screen, or a chosen display, doubling as a board to draw on.
+  - Optional **spotlight**, **click ripples**, and **persistent ink**, all off by
+    default. Hold ⌥ while dragging to keep just that stroke; ⌫ / ⌃Z / ⌘Z undo,
+    ⌘⌫ clears.
 - **Pin** on top, animated border while working, **cancel** any time, **Esc** to
   dismiss, onboarding on first launch.
 
@@ -47,7 +74,7 @@ never touched. Browsers/Electron apps are woken on demand (`AXManualAccessibilit
   `/opt/homebrew/bin/copilot` (configurable), signed in. Required even for BYOK —
   the runtime authenticates with your GitHub Copilot account.
 - Node.js 20+
-- Swift toolchain (to build from source)
+- Xcode (to build from source; the build scripts use its toolchain automatically)
 
 ## Install
 
@@ -89,13 +116,22 @@ running. Without them the DMG is self-signed (one-time Gatekeeper bypass needed)
 
 ## Settings
 
-- **General** — Copilot CLI path, model source, default model, system message,
+- **General** — Copilot CLI path, model source, default model, reasoning effort
+  (low → max, clamped to what the model supports), Auto routing tier (Fast,
+  Efficient, Balanced, Smartest), system message,
   clipboard history size, default choices, auto-popup, launch at login, web
   search engines, clipboard-window hotkey.
 - **Models (BYOK)** — manage bring-your-own models with Test Connection.
 - **Tasks** — custom tasks (icon, name, instruction) and global hotkeys.
-- **Advanced** — skills folder; MCP servers from `mcp.json` with per-server
-  toggles.
+- **FocusTrace** — on/off, toggle hotkey, cursor size, shape (system arrow,
+  arrow, pointing hand, dot, ring, crosshair) and color, halo, drag behavior,
+  color (or multicolor), line width, fade duration, persistent ink, smart
+  shapes, click ripples and their size, spotlight radius and dim, magnifier lens size, blank-screen
+  shortcuts, and Screen Recording permission status.
+- **Advanced** — working folder, skills folder, and MCP servers from `mcp.json`
+  with per-server toggles (applied to all Copilot tasks; disabled servers are
+  passed to the SDK as `disabledMcpServers`, so they're also skipped when found
+  via config discovery).
 - **Security** — auto-approve tool requests (**off by default**: AI prompts
   include selected text, which can be untrusted).
 

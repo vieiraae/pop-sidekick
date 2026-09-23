@@ -6,6 +6,6 @@
   "description": "Node sidecar that drives the GitHub Copilot SDK for Pop Sidekick.",
   "main": "copilot-bridge.mjs",
   "dependencies": {
-    "@github/copilot-sdk": "^1.0.1"
+    "@github/copilot-sdk": "^1.0.14"
   }
 }

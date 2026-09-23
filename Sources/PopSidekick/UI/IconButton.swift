@@ -111,8 +111,6 @@ struct SearchMenu: View {
     }
 }
 
-/// A split paste button: clicking the icon pastes with source styling; the
-/// small chevron opens a menu offering Match Style and Plain Text.
 /// The Paste split-button. Its dropdown adapts to what's on the clipboard:
 /// plain text/link/file paste with no dropdown; rich text exposes the style
 /// options; an image pastes the image and offers "Paste Extracted Text".
@@ -130,7 +128,11 @@ struct PasteMenu: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            IconButton(systemName: systemName, help: help) { onPaste(.source) }
+            IconButton(systemName: systemName, help: kind == .image ? help : "\(help) (⌥ plain text)") {
+                // Holding ⌥ pastes plain text (images always paste as images).
+                let plain = kind != .image && NSEvent.modifierFlags.contains(.option)
+                onPaste(plain ? .plainText : .source)
+            }
             if showsDropdown {
                 Menu {
                     if kind == .image {

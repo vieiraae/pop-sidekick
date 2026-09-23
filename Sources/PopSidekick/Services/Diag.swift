@@ -32,7 +32,8 @@ enum Diag {
             handle.write(line.data(using: .utf8)!)
             try? handle.close()
         } else {
-            try? line.data(using: .utf8)!.write(to: url)
+            FileManager.default.createFile(atPath: url.path, contents: line.data(using: .utf8),
+                                           attributes: [.posixPermissions: 0o600])
         }
     }
 }
